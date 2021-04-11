@@ -1,57 +1,58 @@
+const DEBUGGING = true;
 require('dotenv').config();
+var { PlayerData } = require('./PlayerData.js');
+var { ServerData, STATUS } = require('./ServerData');
+const { FULL, OPEN, LATER } = STATUS;
+
 var nanoID = require('nanoid');
 const PORT = process.env.PORT;
 const io = require('socket.io')(PORT);
+
 const GAMESERVERPASSWORD = process.env.PSWORD;
 var hasGameServer = false;
 var GameServerCount = 0;
-const TeamCount = 6;
+const TEAMCOUNT = 6;
+
 var GameServers = [];
 var MatchMaking = [];
-function Server(position, id, status) {
-    this.position = position;
-    this.id = id;
-    this.status = status;
-}
 
-const Status = { FULL: 1, OPEN: 2, LATER: 3 };
+if (!DEBUGGING)
+    console.log = function(){};
 
 StartServer();
-async function StartServer() {
-    //let MatchMakingInterval = setInterval(() => {
-    //    CheckMatchMaking();
-    //}, 1000);
+
+function StartServer() {
     io.on('connection', Connect);
     console.log("Started Server");
 }
 
 function FindOpenGameServer() {
-    let server = -1;
+
     for (var n in GameServers) {
-        if (GameServers[n].status == Status.OPEN) {
-            server = n;
-            break;
+        if (GameServers[n].serverData.status == OPEN) {
+            return n;
         }
     }
-    return server;
+    return -1;
 }
 
 function CheckMatchMaking() {
 
     if (MatchMaking.length < 2)
         return;
-    //Need to check existing players
 
     let blue = MatchMaking.pop();
 
     //Make sure players are online still
     if (!PlayerConnected(blue)) {
+        console.log(`${blue}: Matchmaking => Removed | Reason: Offline`);
         CheckMatchMaking();
         return;
     }
 
     let red = MatchMaking.pop();
     if (!PlayerConnected(red)) {
+        console.log(`${red}: Matchmaking => Removed | Reason: Offline`);
         PutIntoMatchMaking(blue, undefined);
         CheckMatchMaking();
         return;
@@ -65,9 +66,9 @@ function CheckMatchMaking() {
     let server = FindOpenGameServer();
     //Have game
     if (server != -1) {
-        console.log(GameServers[server].id);
-        io.to(GameServers[server].id).emit('RequestGame', { RequestGame: RequestGame });
-        console.log("Requesting Game");
+        let gameserverID = GameServers[server].id;
+        io.to(gameserverID).emit('RequestGame', { RequestGame: RequestGame });
+        console.log(`Matchmaking => RequestGame to ${gameserverID} for ${blue}, ${red}`);
         return;
     }
     //No game available Server Full
@@ -75,21 +76,34 @@ function CheckMatchMaking() {
 }
 
 function RemovePlayerFromMatchMaking(id) {
-    let player = MatchMaking.indexOf(socket.id);
+    let player = MatchMaking.indexOf(id);
 
     if (player != -1) {
         MatchMaking.splice(player, 1);
-        console.log(`${username} found and removed from matchmaking`);
+        console.log(`${id}: Matchmaking => Removed`);
     }
 }
 
-function SetGameServerFull(id) {
-    for (let n in GameServers) {
-        if (GameServers[n].id == id) {
-            GameServers[n].status = Status.FULL;
-            break;
-        }
+function GetGameServer(id) {
+    for (let n = 0; n < GameServers.length; n++) {
+        if (GameServers[n].id == id)
+            return GameServers[n];
     }
+}
+
+function SetGameServerStatusOpen(id) {
+    SetGameServerStatus(id, OPEN);
+    console.log(`${id}: Status => OPEN`);
+}
+
+function SetGameServerStatusFull(id) {
+    SetGameServerStatus(id, FULL);
+    console.log(`${id}: Status => FULL`);
+}
+
+function SetGameServerStatus(id, status) {
+    let gameServer = GetGameServer(id);
+    gameServer.status = status;
 }
 
 function PlayerConnected(id) {
@@ -98,15 +112,7 @@ function PlayerConnected(id) {
 
 function RemoveAllPlayersFromRoom(RoomName) {
     io.sockets.clients(RoomName).forEach(() => s.leave(RoomName));
-}
-
-function SetGameServerStatus(id, status) {
-    for (let n in GameServers) {
-        if (GameServers[n].id == id) {
-            GameServers[n].status = status;
-            break;
-        }
-    }
+    console.log(`Room: ${RoomName} => clients.leave`);
 }
 
 function SendMessageToPlayers(BlueTeam, RedTeam, message) {
@@ -114,30 +120,48 @@ function SendMessageToPlayers(BlueTeam, RedTeam, message) {
 }
 
 function PutIntoMatchMaking(BlueTeam, RedTeam) {
-    if (PlayerConnected(BlueTeam))
+    if (PlayerConnected(BlueTeam)) {
         MatchMaking.unshift(BlueTeam);
-    if (PlayerConnected(RedTeam))
+        console.log(`${BlueTeam}: Matchmaking => Insert`);
+    }
+    if (PlayerConnected(RedTeam)) {
         MatchMaking.unshift(RedTeam);
+        console.log(`${RedTeam}: Matchmaking => Insert`);
+    }
+}
+
+function GetPlayerData(id) {
+    return GetPlayerSocket(id).playerData;
 }
 
 function GetPlayerSocket(id) {
     return io.sockets.connected[id];
 }
 
-function RegisterGameBetween(BlueTeam, RedTeam, RoomName) {
-    let blue = GetPlayerSocket(BlueTeam);
-    blue.currentGame = RoomName;
-    blue.currentEnemy = RedTeam;
-    blue.playAgain = false;
-    blue.responded = false;
-    blue.join(RoomName);
+function IsEnemyReady(Team) {
+    let playerData = GetPlayerData(Team);
+    let enemyData = GetPlayerData(playerData.currentEnemy);
 
-    let red = GetPlayerSocket(RedTeam);
-    red.currentGame = RoomName;
-    red.currentEnemy = BlueTeam;
-    red.playAgain = false;
-    red.responded = false;
-    red.join(RoomName);
+    return enemyData.ready;
+}
+
+function SetGameForPlayer(Team, Enemy, Room, Server) {
+    let playerData = GetPlayerData(Team);
+    playerData.lookingForGame = false;
+    playerData.inGame = true;
+    playerData.currentGame = Room;
+    playerData.currentEnemy = Enemy;
+    playerData.gameserver = Server;
+    playerData.playAgain = false;
+    playerData.responded = false;
+    playerData.ready = false;
+    playerData.join(Room);
+}
+
+function RegisterGameBetween(BlueTeam, RedTeam, RoomName, GameServer) {
+    SetGameForPlayer(BlueTeam, RedTeam, RoomName, GameServer);
+    SetGameForPlayer(RedTeam, BlueTeam, RoomName, GameServer);
+    console.log(`GameServer: ${GameServer} => Created ${RoomName} for ${BlueTeam}, ${RedTeam}`);
 }
 
 function isString(value) {
@@ -146,25 +170,24 @@ function isString(value) {
 
 function Connect(socket) {
     let isGameServer = false;
-    socket.username = '';
-    socket.selected = [false, false, false, false, false, false];
-    socket.inGame = false;
 
-    socket.lookingForGame = false;
     /** 
      * Game Server Joins
     */
     socket.on('RegisterGameServer', ({ APIKEY }) => {
-        console.log(APIKEY)
+
         if (APIKEY == GAMESERVERPASSWORD) {
             isGameServer = true;
             hasGameServer = true;
             GameServerCount++;
             //This assumes never disconnecting
-            gs = new Server(GameServers.length, socket.id, Status.OPEN);
-            GameServers.push(gs);
+            //let gs = new Server(GameServers.length, socket.id, Status.OPEN);
 
-            console.log(`Game Server Registered. Game Server Count ${GameServerCount}`);
+            let serverData = new ServerData(GameServers.length, socket.id, OPEN);
+            socket.serverData = serverData;
+            GameServers.push(serverData);
+
+            console.log(`${socket.id} => RegisterGameServer. Game Server Count ${GameServerCount}`);
 
             socket.on('AskPlayAgain', ({ BlueTeam, RedTeam, RoomName }) => {
                 SendMessageToPlayers(BlueTeam, RedTeam, 'PlayAgain');
@@ -179,24 +202,21 @@ function Connect(socket) {
             });
 
             socket.on('OpenServer', () => {
-                SetGameServerStatus(socket.id, Status.OPEN);
-                console.log("GameServer requesting opening");
+                SetGameServerStatusOpen(socket.id);
             });
 
             //Called when GameServer is Full and a game was passed to GameServer
             socket.on('GameClosed', ({ BlueTeam, RedTeam, RoomName }) => {
                 PutIntoMatchMaking(BlueTeam, RedTeam);
-                SetGameServerFull(socket.id);
-                console.log("GameServer requesting closure.");
+                SetGameServerStatusFull(socket.id);
             });
 
             socket.on('GameRegistered', ({ BlueTeam, RedTeam, RoomName }) => {
                 if (PlayerConnected(BlueTeam) && PlayerConnected(RedTeam)) {
-                    RegisterGameBetween(BlueTeam, RedTeam, RoomName);
+                    RegisterGameBetween(BlueTeam, RedTeam, RoomName, socket.id);
                     socket.join(RoomName);
                     SendMessageToPlayers(BlueTeam, RedTeam, 'InGame');
                 } else {
-                    console.log(`putting back into matchmaking`);
                     PutIntoMatchMaking(BlueTeam, RedTeam);
                     socket.emit('CancelGame', ({ RoomName }));
                     CheckMatchMaking();
@@ -215,56 +235,75 @@ function Connect(socket) {
      * Player Joins
     */
     socket.on('RegisterPlayer', ({ Username }) => {
+        let playerData = new PlayerData();
+        socket.playerData = playerData;
+
         if (typeof Username === 'object' || Username === null)
             return;
 
         if (isString(Username) && Username.length != 0) {
-            socket.username = Username;
+            playerData.username = Username;
         } else {
             //Generate a username
-            socket.username = nanoID.nanoid().substring(0, 6);
+            playerData.username = nanoID.nanoid().substring(0, 6);
         }
-        console.log(`RegisteredPlayer called ${socket.username} logged into the server.`);
-        socket.emit('LoggedIn', { Username: socket.username });
-        
+        console.log(`RegisteredPlayer => ${socket.id} as ${playerData.username}`);
+        socket.emit('LoggedIn', { Username: playerData.username });
+
         socket.on('Play', () => {
-            if (socket.inGame && !socket.lookingForGame)
+            if (playerData.inGame && !playerData.lookingForGame)
                 return;
 
-            socket.lookingForGame = true;
+            playerData.lookingForGame = true;
 
             MatchMaking.push(socket.id);
-            console.log(`${socket.username} added to Matchmaking`);
+            console.log(`Matchmaking => Insert ${playerData.username} as ${socket.id}`);
             CheckMatchMaking();
             socket.emit('LookingForGame');
         });
 
+        socket.on('Ready', () => {
+            if (!playerData.inGame)
+                return;
+            if (playerData.ready)
+                return;
+            playerData.ready = true;
+            console.log(`Game: ${playerData.currentGame} | Player => ${playerData.username} Ready`);
+            if (IsEnemyReady(socket.id)) {
+                io.in(playerData.currentGame).emit('ReadyCount', { Game: playerData.currentGame });
+                console.log(`Game: ${playerData.currentGame} => ReadyCount`);
+            }
+        });
+
         socket.on('PlayAgain', ({ result }) => {
             //Still needs a lot of work
-            if (!socket.inGame)
+            if (!playerData.inGame)
                 return;
             //socket.currentGame
             //socket.currentEnemy
-            socket.playAgain = result;
-            socket.responded = true;
-            let socket = GetPlayerSocket(socket.currentEnemy);
-            if (socket.responded == true && socket.playAgain != true) {
 
-                for (let gs in GameServers) {
-                    if (GameServers[gs].id == socket.currentGame) {
-                        let gameServerSocket = GetPlayerSocket(GameServers[gs].id);
-                        gameServerSocket.emit('EndGame', { Game: socket.currentGame });
-                        break;
-                    }
-                }
-
-                //Both players want to play again
-                //Nope code
-            }
 
         });
         socket.on('LeaveGame', () => {
-            socket.lookingForGame = false;
+            if (!playerData.inGame)
+                return;
+            //Check if game is running or has ended
+            let room = playerData.currentGame;
+            socket.leave(room);
+            playerData.inGame = false;
+
+            if (!playerData.observing) {
+                let gameserver = GetPlayerSocket(playerData.gameserver);
+                gameserver.emit('PlayerLeft', { Room: room, ID: socket.id });
+
+                let enemy = GetPlayerSocket(playerData.currentEnemy).playerData;
+                if (enemy.inGame && enemy.currentEnemy == socket.id) {
+                    enemy.emit('PlayerLeft');
+                }
+                playerData.currentEnemy = '';
+                RemoveAllPlayersFromRoom(room);
+            }
+
         });
 
         socket.on('Click', ({ Point }) => {
@@ -278,33 +317,34 @@ function Connect(socket) {
         socket.on('Select', ({ Units }) => {
             if (!Array.isArray(Units))
                 return;
-            if (Units.length != TeamCount)
+
+            if (Units.length != TEAMCOUNT)
                 return;
-            for (var n in Units) {
-                if (typeof Units[n] !== 'boolean')
-                    return;
-            }
-            socket.selected = Units;
+
+            if (!Units.every(Boolean))
+                return;
+
+            playerData.selected = Units;
+            console.log(`Username: ${playerData.username} => Select ${Units}`);
         });
     });
 
     socket.on('disconnect', () => {
-
+        //GameServerCount -= isGameServer;
         if (isGameServer) {
             GameServerCount--;
-            console.log(`Game Server disconnected`);
+            hasGameServer = GameServerCount != 0;
+            console.log(`GameServer: ${socket.serverData.id} => Disconnected | Game Server Count: ${GameServerCount}`);
+            if (!hasGameServer) {
+                console.log(`No Game Servers available.`);
+            }
+        } else {
+            if (socket.playerData.lookingForGame == true) {
+                RemovePlayerFromMatchMaking(socket.id);
+                
+            }
+            console.log(`${socket.id} => Disconnect`);
         }
-
-        if (GameServerCount == 0) {
-            console.log(`No Game Servers connected.`);
-            hasGameServer = false;
-        }
-        console.log("Disconnection Detected");
-        if (socket.lookingForGame == true) {
-            console.log(`${socket.username} logged out while looking for a game`);
-            RemovePlayerFromMatchMaking(socket.id);
-        }
-
     });
 
     socket.emit("connection");

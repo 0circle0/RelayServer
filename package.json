@@ -22,5 +22,6 @@
     "url": "https://github.com/0circle0/RelayServer/issues"
   },
   "homepage": "https://github.com/0circle0/RelayServer#readme",
-  "description": ""
+  "description": "",
+  "devDependencies": {}
 }
