@@ -3,6 +3,7 @@ class ServerData {
         this.position = position;
         this.id = id;
         this.status = status;
+        this.gamesOpen = 0;
     }
 }
 const STATUS = { FULL: 1, OPEN: 2, LATER: 3 };
