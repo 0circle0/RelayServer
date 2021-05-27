@@ -5,6 +5,7 @@ class PlayerData {
         this.currentGame = '';
         this.currentEnemy = '';
         this.gameserver = '';
+        this.gameIndex = -1;
         this.playAgain = false;
         this.responded = false;
         this.ready = false;

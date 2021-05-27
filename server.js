@@ -1,3 +1,5 @@
+// noinspection JSCheckFunctionSignatures
+
 const DEBUGGING = true;
 require('dotenv').config();
 const {PlayerData} = require('./PlayerData.js');
@@ -174,13 +176,14 @@ function IsEnemyReady(team) {
     return enemyData.ready;
 }
 
-function SetGameForPlayer(team, enemy, room, server) {
+function SetGameForPlayer(team, enemy, room, server, index) {
     let playerData = GetPlayerData(team);
     playerData.lookingForGame = false;
     playerData.inGame = true;
     playerData.currentGame = room;
     playerData.currentEnemy = enemy;
     playerData.gameserver = server;
+    playerData.gameIndex = index;
     playerData.playAgain = false;
     playerData.responded = false;
     playerData.ready = false;
@@ -188,9 +191,9 @@ function SetGameForPlayer(team, enemy, room, server) {
     playerSocket.join(room);
 }
 
-function RegisterGameBetween(blueTeam, redTeam, roomName, gameServer) {
-    SetGameForPlayer(blueTeam, redTeam, roomName, gameServer);
-    SetGameForPlayer(redTeam, blueTeam, roomName, gameServer);
+function RegisterGameBetween(blueTeam, redTeam, roomName, gameServer, index) {
+    SetGameForPlayer(blueTeam, redTeam, roomName, gameServer, index);
+    SetGameForPlayer(redTeam, blueTeam, roomName, gameServer, index);
     console.log(`GameServer: ${gameServer} => Created ${roomName} for ${blueTeam}, ${redTeam}`);
 }
 
@@ -204,7 +207,7 @@ function LeaveGame(id, playerData) {
     if (!playerData.inGame)
         return;
     //Check if game is running or has ended
-    let RoomName = playerData.currentGame;
+    let RoomIndex = playerData.gameIndex;
 
     let enemy = GetPlayerData(playerData.currentEnemy);
     let enemySocket = GetPlayerSocket(playerData.currentEnemy);
@@ -216,16 +219,17 @@ function LeaveGame(id, playerData) {
         let game_server = GetPlayerSocket(playerData.gameserver);
         //game_server.emit('PlayerLeft', {Room: room, ID: id});
         if (typeof game_server !== 'undefined')
-            game_server.emit('ResetGame', {RoomName});
-        RemoveAllPlayersFromRoom(RoomName);
+            game_server.emit('ResetGame', {RoomIndex});
+        RemoveAllPlayersFromRoom(playerData.currentGame);
     }
     playerData.inGame = false;
     playerData.currentEnemy = '';
 }
 
-function StartReadyCountForGame(currentGame) {
+function StartReadyCountForGame(currentGame, index) {
     setTimeout(() => {
-        io.in(currentGame).emit('ReadyCount', {Game: currentGame});
+
+        io.in(currentGame).emit('ReadyCount', {Game: index});
         console.log(`Game: ${currentGame} => ReadyCount`);
     }, 2000);
 }
@@ -256,10 +260,10 @@ function Connect(socket) {
 
         console.log(`${socket.id} => RegisterGameServer. Game Server Count ${GameServerCount}`);
 
-        socket.on('AskPlayAgain', ({BlueTeam, RedTeam, RoomName}) => {
-            SendMessageToPlayers(BlueTeam, RedTeam, 'PlayAgain');
-            //At this point we will no longer know anything about this
-        });
+        //socket.on('AskPlayAgain', ({BlueTeam, RedTeam, RoomName}) => {
+        //    SendMessageToPlayers(BlueTeam, RedTeam, 'PlayAgain');
+        //    //At this point we will no longer know anything about this
+        //});
 
         socket.on('GameOver', ({BlueTeam, RedTeam, RoomName}) => {
             //We want the option to replay
@@ -275,7 +279,7 @@ function Connect(socket) {
         socket.on('ServerFull', (game) => {
 
             let {BlueTeam, RedTeam} = game;
-            console.log(`Server Full triggered. ${BlueTeam} & ${RedTeam} put back into matchmaking. This message should never display unless tag between NodeJS and GameServer? doubtful`)
+            console.log(`Server Full triggered. ${BlueTeam} & ${RedTeam} put back into matchmaking. This message should never display unless lag between NodeJS and GameServer? doubtful`)
             PutIntoMatchMaking(BlueTeam, RedTeam);
             let Red = GetPlayerSocket(RedTeam);
             let Blue = GetPlayerSocket(BlueTeam);
@@ -296,15 +300,10 @@ function Connect(socket) {
             console.log(`GameServer: ${socket.id} => GamesOpen: ${GamesOpen()}`);
         });
 
-        //Called when GameServer is Full and a game was passed to GameServer
-        socket.on('GameClosed', ({BlueTeam, RedTeam, RoomName}) => {
-            PutIntoMatchMaking(BlueTeam, RedTeam);
-            SetGameServerStatusFull(socket.id);
-        });
+        socket.on('GameRegistered', ({BlueTeam, RedTeam, RoomName, GameIndex}) => {
 
-        socket.on('GameRegistered', ({BlueTeam, RedTeam, RoomName}) => {
             if (PlayerConnected(BlueTeam) && PlayerConnected(RedTeam)) {
-                RegisterGameBetween(BlueTeam, RedTeam, RoomName, socket.id);
+                RegisterGameBetween(BlueTeam, RedTeam, RoomName, socket.id, GameIndex);
                 socket.join(RoomName);
                 //SendMessageToPlayers(BlueTeam, RedTeam, 'InGame');
                 io.to(BlueTeam).emit('InGame', {Enemy: GetPlayerData(RedTeam).username, BlueTeam, RedTeam});
@@ -315,6 +314,13 @@ function Connect(socket) {
             }
 
             CheckMatchMaking();
+        });
+
+        socket.on('GameStates', ({NetGames}) => {
+            for(let i = 0; i < NetGames.length; i++) {
+                let {State, RoomName} = NetGames[i];
+                socket.in(RoomName).emit('GameState', State);
+            }
         });
 
         socket.emit('RegisteredAsGameServer');
@@ -361,7 +367,7 @@ function Connect(socket) {
             console.log(`Game: ${playerData.currentGame} | Player => ${playerData.username} Ready`);
 
             if (IsEnemyReady(socket.id)) {
-                StartReadyCountForGame(playerData.currentGame);
+                StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
             }
 
             let enemy = GetPlayerSocket(playerData.currentEnemy);
@@ -369,6 +375,7 @@ function Connect(socket) {
         });
 
         socket.on('PlayAgain', ({result}) => {
+            console.log(result);
             //Still needs a lot of work
             //if (!playerData.inGame)
             //    return;
@@ -388,12 +395,26 @@ function Connect(socket) {
             playerData.lookingForGame = false;
         });
 
-        socket.on('Click', ({Point}) => {
-            //Vector2(x, y);
-            //We do nothing
-            //Send directly to the GameServer appending the ID of the game we are in
-            let newPoint = {GameID: 3, Selected: socket.selected, Point: Point};
-            //
+        socket.on('Click', ({Selection, Position}) => {
+            if (!Array.isArray(Selection))
+                return;
+
+            if (Selection.length !== TEAM_COUNT)
+                return;
+
+            if (!Selection.every(Boolean))
+                return;
+
+            if (typeof Position.x !== 'number' || typeof Position.y !== 'number') {
+                console.log("Click - Not A Number")
+                return;
+            }
+
+            let point = {x: Position.x, y: Position.y};
+
+            let newPoint = {GameID: socket.data.playerData.gameIndex, Selected: Selection, Point: point};
+            let gameServer = socket.data.playerData.gameserver;
+            io.emit(gameServer, newPoint);
         });
 
         socket.on('Select', ({Units}) => {
