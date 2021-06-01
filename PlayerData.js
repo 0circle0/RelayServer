@@ -4,6 +4,7 @@ class PlayerData {
         this.inGame = false;
         this.currentGame = '';
         this.currentEnemy = '';
+        this.currentTeam = -1;
         this.gameserver = '';
         this.gameIndex = -1;
         this.playAgain = false;

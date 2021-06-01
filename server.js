@@ -43,14 +43,21 @@ function StartServer() {
 }
 
 function FindOpenGameServer() {
-
+    let highest = -1;
+    let bestServer;
     for (let n in GameServers) {
-        //let {serverData} = GameServers[n];
-        if (GameServers[n].status === OPEN && GameServers[n].gamesOpen > 0) {
-            return n;
+        let {status, gamesOpen} = GameServers[n];
+        if (status === OPEN && gamesOpen > 0) {
+           if (gamesOpen > highest) {
+               highest = gamesOpen;
+               bestServer = n;
+           }
         }
     }
-    return -1;
+    if (highest === 999)
+        return -1;
+
+    return bestServer;
 }
 
 function CheckMatchMaking() {
@@ -176,7 +183,7 @@ function IsEnemyReady(team) {
     return enemyData.ready;
 }
 
-function SetGameForPlayer(team, enemy, room, server, index) {
+function SetGameForPlayer(team, enemy, room, server, index, currentTeam) {
     let playerData = GetPlayerData(team);
     playerData.lookingForGame = false;
     playerData.inGame = true;
@@ -187,13 +194,15 @@ function SetGameForPlayer(team, enemy, room, server, index) {
     playerData.playAgain = false;
     playerData.responded = false;
     playerData.ready = false;
+    playerData.currentTeam = currentTeam;
     let playerSocket = GetPlayerSocket(team);
     playerSocket.join(room);
 }
 
 function RegisterGameBetween(blueTeam, redTeam, roomName, gameServer, index) {
-    SetGameForPlayer(blueTeam, redTeam, roomName, gameServer, index);
-    SetGameForPlayer(redTeam, blueTeam, roomName, gameServer, index);
+    SetGameForPlayer(blueTeam, redTeam, roomName, gameServer, index, 0);
+    SetGameForPlayer(redTeam, blueTeam, roomName, gameServer, index, 1);
+
     console.log(`GameServer: ${gameServer} => Created ${roomName} for ${blueTeam}, ${redTeam}`);
 }
 
@@ -240,6 +249,21 @@ function GamesOpen() {
         count += GameServers[i].gamesOpen;
     }
     return count;
+}
+
+function ArrayValuesAllBooleanAndNotAllFalse(Selection, count) {
+
+    const keys = Object.keys(Selection);
+
+    let falseCount = 0;
+    for (const key in keys) {
+        if (typeof Selection[key] !== 'boolean')
+            return false;
+
+        falseCount += !Selection[key];
+    }
+
+    return falseCount !== count;
 }
 
 function Connect(socket) {
@@ -316,10 +340,10 @@ function Connect(socket) {
             CheckMatchMaking();
         });
 
-        socket.on('GameStates', ({NetGames}) => {
-            for(let i = 0; i < NetGames.length; i++) {
-                let {State, RoomName} = NetGames[i];
-                socket.in(RoomName).emit('GameState', State);
+        socket.on('GameStates', ({netGames}) => {
+            for (let i = 0; i < netGames.length; i++) {
+                let {state, roomName} = netGames[i];
+                socket.in(roomName).emit('GameState', state);
             }
         });
 
@@ -374,17 +398,6 @@ function Connect(socket) {
             enemy.emit('EnemyReady');
         });
 
-        socket.on('PlayAgain', ({result}) => {
-            console.log(result);
-            //Still needs a lot of work
-            //if (!playerData.inGame)
-            //    return;
-            //socket.currentGame
-            //socket.currentEnemy
-
-
-        });
-
         socket.on('LeaveGame', () => LeaveGame(socket.id, socket.data.playerData));
 
         socket.on('LeaveQueue', () => {
@@ -396,39 +409,32 @@ function Connect(socket) {
         });
 
         socket.on('Click', ({Selection, Position}) => {
+            if (!socket.data.playerData.inGame)
+                return;
+
             if (!Array.isArray(Selection))
                 return;
 
             if (Selection.length !== TEAM_COUNT)
                 return;
 
-            if (!Selection.every(Boolean))
+            let boolCheck = ArrayValuesAllBooleanAndNotAllFalse(Selection, 6);
+            if (!boolCheck)
                 return;
 
-            if (typeof Position.x !== 'number' || typeof Position.y !== 'number') {
-                console.log("Click - Not A Number")
+            if (typeof Position.x !== 'number' || typeof Position.z !== 'number')
                 return;
-            }
 
-            let point = {x: Position.x, y: Position.y};
+            let point = {x: Position.x, z: Position.z};
 
-            let newPoint = {GameID: socket.data.playerData.gameIndex, Selected: Selection, Point: point};
+            let newPoint = {
+                GameID: socket.data.playerData.gameIndex,
+                Selected: Selection,
+                Point: point,
+                Team: socket.data.playerData.currentTeam
+            };
             let gameServer = socket.data.playerData.gameserver;
-            io.emit(gameServer, newPoint);
-        });
-
-        socket.on('Select', ({Units}) => {
-            if (!Array.isArray(Units))
-                return;
-
-            if (Units.length !== TEAM_COUNT)
-                return;
-
-            if (!Units.every(Boolean))
-                return;
-
-            playerData.selected = Units;
-            console.log(`Username: ${playerData.username} => Select ${Units}`);
+            io.to(gameServer).emit("Click", newPoint);
         });
     });
 
