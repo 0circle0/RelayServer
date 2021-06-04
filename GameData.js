@@ -3,6 +3,7 @@ class GameData {
         this.RoomName = roomName;
         this.Players = players;
         this.GameServerOwner = owner;
+        this.timeout = setTimeout(()=>{});
     }
 }
 
