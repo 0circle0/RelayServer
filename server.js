@@ -2,9 +2,14 @@
 
 const DEBUGGING = true;
 require('dotenv').config();
-const {PlayerData} = require('./PlayerData.js');
+const {PlayerData} = require('./PlayerData');
 const {ServerData, STATUS} = require('./ServerData');
+const {GameData} = require('./GameData')
+const {Prompter} = require('./Prompter');
+
 const {FULL, OPEN} = STATUS;
+
+let RegisteredGames = [];
 
 const nanoID = require('nanoid');
 const PORT = process.env.PORT;
@@ -40,6 +45,7 @@ StartServer();
 function StartServer() {
     io.on('connection', Connect);
     console.log("Started Server");
+    //new Prompter(io);
 }
 
 function FindOpenGameServer() {
@@ -48,13 +54,13 @@ function FindOpenGameServer() {
     for (let n in GameServers) {
         let {status, gamesOpen} = GameServers[n];
         if (status === OPEN && gamesOpen > 0) {
-           if (gamesOpen > highest) {
-               highest = gamesOpen;
-               bestServer = n;
-           }
+            if (gamesOpen > highest) {
+                highest = gamesOpen;
+                bestServer = n;
+            }
         }
     }
-    if (highest === 999)
+    if (highest === -1)
         return -1;
 
     return bestServer;
@@ -88,25 +94,16 @@ function CheckMatchMaking() {
         return;
     }
 
+    let gameServerID = GameServers[server].id;
 
-    //Have game
-
-    if (server !== -1) {
-        let gameServerID = GameServers[server].id;
-
-        let request = {
-            BlueTeam: blue,
-            RedTeam: red,
-            RoomName: nanoID.nanoid().toString()
-        }
-
-        io.to(gameServerID).emit('GameRequest', request);
-        console.log(`Matchmaking => GameRequest to ${gameServerID} for ${blue}, ${red}`);
-        return;
+    let request = {
+        BlueTeam: blue,
+        RedTeam: red,
+        RoomName: nanoID.nanoid().toString()
     }
-    //No game available Server Full
-    PutIntoMatchMaking(red, blue);
-    //SendMessageToPlayers(blue, red, 'ServerFull');
+
+    io.to(gameServerID).emit('GameRequest', request);
+    console.log(`Matchmaking => GameRequest to ${gameServerID} for ${blue}, ${red}`);
 }
 
 function RemovePlayerFromMatchMaking(id) {
@@ -210,12 +207,52 @@ function isString(value) {
     return typeof value === 'string' || value instanceof String;
 }
 
-function LeaveGame(id, playerData) {
-    //let playerData = GetPlayerData(id);
+function RemoveRegisteredGame(currentGame) {
+    let gameData = RegisteredGames.findIndex((data) => data.RoomName === currentGame);
 
+    if (gameData !== -1) {
+        RegisteredGames.splice(gameData, 1);
+    }
+}
+
+function NotifyPlayersOfGameServerDisconnect(gameServerOwnerID) {
+    let games = RegisteredGames.find((data) => data.GameServerOwner === gameServerOwnerID);
+    if (typeof games === 'undefined')
+        return;
+
+    if (games.length < 1)
+        return;
+
+    let NewRegisteredGames = [];
+    let removedCount = 0;
+    for (let i = 0; i < RegisteredGames.length; i++) {
+        let data = RegisteredGames[i];
+        if (data.GameServerOwner !== gameServerOwnerID) {
+            NewRegisteredGames.push(data);
+            continue;
+        }
+        //RemoveRegisteredGame(data.RoomName);
+        removedCount++;
+        for (let k = 0; k < data.Players.length; k++) {
+            let player = data.Players[k];
+            let playerData = GetPlayerData(player);
+            playerData.inGame = false;
+
+            io.to(player).emit('GameServerOffline');
+        }
+    }
+
+    console.log('Notified Players of Game Server Disconnect');
+    let removal = RegisteredGames.length - removedCount;
+    RegisteredGames = NewRegisteredGames;
+    console.assert(RegisteredGames.length === removal, `Invalid RegisterGame.length ${RegisteredGames.length} mismatch ${removal}`);
+}
+
+function LeaveGame(id, playerData) {
     if (!playerData.inGame)
         return;
     //Check if game is running or has ended
+    RemoveRegisteredGame(playerData.currentGame);
     let RoomIndex = playerData.gameIndex;
 
     let enemy = GetPlayerData(playerData.currentEnemy);
@@ -293,6 +330,8 @@ function Connect(socket) {
             //We want the option to replay
             RemoveAllPlayersFromRoom(RoomName);
             SendMessageToPlayers(BlueTeam, RedTeam, 'GameOver');
+
+            RemoveRegisteredGame(RoomName);
             //inGame = false
         });
 
@@ -332,6 +371,9 @@ function Connect(socket) {
                 //SendMessageToPlayers(BlueTeam, RedTeam, 'InGame');
                 io.to(BlueTeam).emit('InGame', {Enemy: GetPlayerData(RedTeam).username, BlueTeam, RedTeam});
                 io.to(RedTeam).emit('InGame', {Enemy: GetPlayerData(BlueTeam).username, BlueTeam, RedTeam});
+                let players = [BlueTeam, RedTeam];
+                let gameData = new GameData(RoomName, players, socket.id)
+                RegisteredGames.push(gameData);
             } else {
                 PutIntoMatchMaking(BlueTeam, RedTeam);
                 socket.emit('ResetGame', RoomName);
@@ -409,7 +451,7 @@ function Connect(socket) {
         });
 
         socket.on('Click', ({Selection, Position}) => {
-            if (!socket.data.playerData.inGame)
+            if (!playerData.inGame)
                 return;
 
             if (!Array.isArray(Selection))
@@ -428,22 +470,21 @@ function Connect(socket) {
             let point = {x: Position.x, z: Position.z};
 
             let newPoint = {
-                GameID: socket.data.playerData.gameIndex,
+                GameID: playerData.gameIndex,
                 Selected: Selection,
                 Point: point,
-                Team: socket.data.playerData.currentTeam
+                Team: playerData.currentTeam
             };
-            let gameServer = socket.data.playerData.gameserver;
+            let gameServer = playerData.gameserver;
             io.to(gameServer).emit("Click", newPoint);
         });
     });
 
     socket.on('disconnect', () => {
-        //GameServerCount -= isGameServer;
         if (isGameServer) {
 
             //Gather all games running on server and notify all players of disconnection
-
+            NotifyPlayersOfGameServerDisconnect(socket.id);
             let id = GameServers.indexOf(socket.data.serverData);
             if (id !== -1) {
                 GameServers.splice(id, 1);
