@@ -2,6 +2,15 @@
 
 const DEBUGGING = true;
 require('dotenv').config();
+
+const MongoClient = require('mongodb').MongoClient;
+const url = 'mongodb://localhost:27017';
+const dbName = 'Football';
+const collectionName = 'Games';
+let _client;
+let mongoDB;
+
+
 const {PlayerData} = require('./PlayerData');
 const {ServerData, STATUS} = require('./ServerData');
 const {GameData} = require('./GameData')
@@ -19,7 +28,11 @@ let io;
 io = require('socket.io')(PORT);
 
 const GAME_SERVER_PASSWORD = process.env.PASSWORD;
+const ADMIN_SERVER_PASSWORD = process.env.ADMIN;
+const PLAYER_PASSWORD = process.env.PLAYER;
+
 let hasGameServer = false;
+let adminSocket;
 let GameServerCount = 0;
 const TEAM_COUNT = 6;
 
@@ -43,8 +56,19 @@ if (!DEBUGGING)
 StartServer();
 
 function StartServer() {
-    io.on('connection', Connect);
-    console.log("Started Server");
+    let options = {useNewUrlParser: true, useUnifiedTopology: true};
+    let p = MongoClient.connect(url, options, (err, client) => {
+        if (err) {
+            console.log(err);
+            return;
+        }
+        console.log("Connected to Mongo");
+        _client = client;
+        mongoDB = client.db(dbName).collection(collectionName);
+        io.on('connection', Connect);
+        console.log("Started Server");
+    });
+
     //new Prompter(io);
 }
 
@@ -100,7 +124,7 @@ function CheckMatchMaking() {
     }
 
     io.to(gameServerID).emit('GameRequest', request);
-    console.log(`Matchmaking => GameRequest to ${gameServerID} for ${blue}, ${red}`);
+    console.log(`Matchmaking => GameRequest to ${gameServerID} for \n\t Players: ${blue}, ${red}`);
 }
 
 function FindOpenGameServer() {
@@ -134,7 +158,6 @@ function GetPlayerData(id) {
 }
 
 function GetPlayerSocket(id) {
-    //console.log(io.sockets.sockets.get(id))
     return io.sockets.sockets.get(id);
 }
 
@@ -174,6 +197,14 @@ function LeaveGame(id, playerData) {
     let RoomIndex = playerData.gameIndex;
 
     let enemy = GetPlayerData(playerData.currentEnemy);
+    let enemyId = GetPlayerSocket(playerData.currentEnemy).id;
+    let RoomName = playerData.currentGame;
+    let result = {$set: {winner: enemy.username, winnersID: enemyId}}
+
+    let filter = {roomName: RoomName};
+    let options = {upsert: false};
+    mongoDB.updateOne(filter, result, options);
+
     let enemySocket = GetPlayerSocket(playerData.currentEnemy);
     if (enemy.inGame && enemy.currentEnemy === id) {
         enemySocket.emit('PlayerLeft');
@@ -181,7 +212,6 @@ function LeaveGame(id, playerData) {
         enemy.currentEnemy = '';
 
         let game_server = GetPlayerSocket(playerData.gameserver);
-        //game_server.emit('PlayerLeft', {Room: room, ID: id});
         if (typeof game_server !== 'undefined')
             game_server.emit('ResetGame', {RoomIndex});
         RemoveAllPlayersFromRoom(playerData.currentGame);
@@ -207,10 +237,11 @@ function NotifyPlayersOfGameServerDisconnect(gameServerOwnerID) {
             continue;
         }
         clearTimeout(data.timeout);
-        //RemoveRegisteredGame(data.RoomName);
         removedCount++;
         for (let k = 0; k < data.Players.length; k++) {
             let player = data.Players[k];
+            console.log(player)
+            console.log('test');
             let playerData = GetPlayerData(player);
             playerData.inGame = false;
 
@@ -221,7 +252,6 @@ function NotifyPlayersOfGameServerDisconnect(gameServerOwnerID) {
     console.log('Notified Players of Game Server Disconnect');
     let removal = RegisteredGames.length - removedCount;
     RegisteredGames = NewRegisteredGames;
-    console.assert(RegisteredGames.length === removal, `Invalid RegisterGame.length ${RegisteredGames.length} mismatch ${removal}`);
 }
 
 function PlayerConnected(id) {
@@ -244,11 +274,11 @@ function RegisterGameBetween(blueTeam, redTeam, roomName, gameServer, index) {
     SetGameForPlayer(blueTeam, redTeam, roomName, gameServer, index, 0);
     SetGameForPlayer(redTeam, blueTeam, roomName, gameServer, index, 1);
 
-    console.log(`GameServer: ${gameServer} => Created ${roomName} for ${blueTeam}, ${redTeam}`);
+    console.log(`GameServer: ${gameServer} => Created Room: ${roomName} \n\tPlayers ${blueTeam.data.username}: ${blueTeam.socket.id}, ${redTeam.data.username}: ${redTeam.socket.id}`);
+
 }
 
 function RemoveAllPlayersFromRoom(roomName) {
-    //There is a better way to do this
     io.socketsLeave(roomName);
     console.log(`Room: ${roomName} => clients.leave`);
 }
@@ -258,7 +288,7 @@ function RemoveRegisteredGame(currentGame) {
     let game = GetRegisteredGame(currentGame);
 
     if (game !== -1) {
-        let {Game, ID} = game;
+        let {ID} = game;
 
         clearTimeout(game.Game.timeout);
         RegisteredGames.splice(ID, 1);
@@ -270,18 +300,21 @@ function SendMessageToPlayers(blueTeam, redTeam, message) {
 }
 
 function SetGameForPlayer(team, enemy, room, server, index, currentTeam) {
-    let playerData = GetPlayerData(team);
+
+    let enemyID = enemy.socket.id;
+    let playerSocket = team.socket;
+    let {playerData} = playerSocket.data;
     playerData.lookingForGame = false;
     playerData.inGame = true;
     playerData.currentGame = room;
-    playerData.currentEnemy = enemy;
+    playerData.currentEnemy = enemyID;
     playerData.gameserver = server;
     playerData.gameIndex = index;
     playerData.playAgain = false;
     playerData.responded = false;
     playerData.ready = false;
     playerData.currentTeam = currentTeam;
-    let playerSocket = GetPlayerSocket(team);
+
     playerSocket.join(room);
 }
 
@@ -302,8 +335,7 @@ function SetGameServerStatusOpen(id) {
 
 function StartReadyCountForGame(currentGame, index) {
     let game = GetRegisteredGame(currentGame);
-    //let gameID = RegisteredGames.findIndex((data) => data.RoomName === currentGame)
-    if (game!== -1) {
+    if (game !== -1) {
 
         clearTimeout(game.Game.timeout);
     }
@@ -324,10 +356,7 @@ function GamesOpen() {
 
 function Connect(socket) {
     let isGameServer = false;
-
-    /**
-     * Server Controller UI with Auth token
-     */
+    let token = socket.handshake.auth.token;
 
     /**
      * Game Server Joins with Auth token
@@ -336,8 +365,6 @@ function Connect(socket) {
         isGameServer = true;
         hasGameServer = true;
         GameServerCount++;
-        //This assumes never disconnecting
-        //let gs = new Server(GameServers.length, socket.id, Status.OPEN);
 
         let serverData = new ServerData(GameServers.length, socket.id, OPEN);
         socket.data.serverData = serverData;
@@ -345,18 +372,25 @@ function Connect(socket) {
 
         console.log(`${socket.id} => RegisterGameServer. Game Server Count ${GameServerCount}`);
 
-        //socket.on('AskPlayAgain', ({BlueTeam, RedTeam, RoomName}) => {
-        //    SendMessageToPlayers(BlueTeam, RedTeam, 'PlayAgain');
-        //    //At this point we will no longer know anything about this
-        //});
-
-        socket.on('GameOver', ({BlueTeam, RedTeam, RoomName}) => {
+        socket.on('GameOver', ({BlueTeam, RedTeam, RoomName, winner}) => {
             //We want the option to replay
             RemoveAllPlayersFromRoom(RoomName);
             SendMessageToPlayers(BlueTeam, RedTeam, 'GameOver');
 
             RemoveRegisteredGame(RoomName);
-            //inGame = false
+            let players = [BlueTeam, RedTeam];
+            let winnerSocket = GetPlayerSocket(players[winner]);
+            let {playerData} = winnerSocket.data.playerData;
+            let winnerID = winnerSocket.id;
+            let result = {$set: {winner: playerData.username, winnersID: winnerID}};
+            let filter = {roomName: RoomName};
+            let options = {upsert: false};
+            mongoDB.updateOne(filter, result, options, function (err, res) {
+                if (err) {
+                    console.log('error updating db')
+                } else
+                    console.log(res)
+            });
         });
 
         socket.on('OpenServer', () => {
@@ -381,7 +415,6 @@ function Connect(socket) {
 
         socket.on('GamesOpen', (gamesOpen) => {
             serverData.gamesOpen = gamesOpen;
-            //let statusFull = serverData.status === STATUS.FULL;
             gamesOpen === 0 ? SetGameServerStatusFull(socket.id) : SetGameServerStatusOpen(socket.id);
             CheckMatchMaking();
             console.log(`GameServer: ${socket.id} => GamesOpen: ${GamesOpen()}`);
@@ -390,26 +423,45 @@ function Connect(socket) {
         socket.on('GameRegistered', ({BlueTeam, RedTeam, RoomName, GameIndex}) => {
 
             if (PlayerConnected(BlueTeam) && PlayerConnected(RedTeam)) {
-                RegisterGameBetween(BlueTeam, RedTeam, RoomName, socket.id, GameIndex);
+                let blueSocket = GetPlayerSocket(BlueTeam)
+                let blueData = blueSocket.data.playerData;
+                let redSocket = GetPlayerSocket(RedTeam)
+                let redData = redSocket.data.playerData;
+
+                let TeamBlue = { socket: blueSocket, data: blueData}
+                let TeamRed = { socket: redSocket, data: redData}
+
+                RegisterGameBetween(TeamBlue, TeamRed, RoomName, socket.id, GameIndex);
                 socket.join(RoomName);
-                //SendMessageToPlayers(BlueTeam, RedTeam, 'InGame');
-                let blueData = GetPlayerData(BlueTeam);
-                let redData = GetPlayerData(RedTeam);
+
                 io.to(BlueTeam).emit('InGame', {Enemy: redData.username, BlueTeam, RedTeam});
                 io.to(RedTeam).emit('InGame', {Enemy: blueData.username, BlueTeam, RedTeam});
 
-                let players = [BlueTeam, RedTeam];
+                let players = [{BlueTeam, Username: blueData.username, IP: blueSocket.handshake.address}, {
+                    RedTeam,
+                    Username: redData.username,
+                    IP: redSocket.handshake.address
+                }];
+                let game = {
+                    players,
+                    roomName: RoomName,
+                    gameServer: socket.id,
+                    index: GameIndex,
+                    serverIP: socket.handshake.address
+                }
+                mongoDB.insertOne(game);
+
+                players = [BlueTeam, RedTeam];
                 let gameData = new GameData(RoomName, players, socket.id)
-                gameData.timeout = setTimeout(()=> {
+                gameData.timeout = setTimeout(() => {
                     if (blueData.ready && redData.ready)
                         return;
 
                     blueData.ready = true;
                     redData.ready = true;
-                    //io.to(gameData.RoomName).emit("EnemyReady");
 
                     StartReadyCountForGame(gameData.RoomName);
-                },30000);
+                }, 30000);
                 RegisteredGames.push(gameData);
             } else {
                 PutIntoMatchMaking(BlueTeam, RedTeam);
@@ -432,96 +484,97 @@ function Connect(socket) {
     /**
      * Player Joins
      */
-    socket.on('RegisterPlayer', ({Username}) => {
-        let playerData = new PlayerData();
-        socket.data.playerData = playerData;
+    //Clients will have the token changed during patches. This will maintain the update status of the game.
+    if (typeof token === 'undefined') {
+        socket.on('RegisterPlayer', ({Username}) => {
+            let playerData = new PlayerData();
+            socket.data.playerData = playerData;
 
-        if (typeof Username === 'object' || Username === null)
-            return;
-
-        if (isString(Username) && Username.length !== 0) {
-            playerData.username = Username;
-        } else {
-            //Generate a username
-            playerData.username = nanoID.nanoid().substring(0, 6);
-        }
-        console.log(`RegisteredPlayer => ${socket.id} as ${playerData.username}`);
-        socket.emit('LoggedIn', {Username: playerData.username});
-
-        socket.on('Play', () => {
-            if (playerData.inGame && !playerData.lookingForGame)
+            if (typeof Username === 'object' || Username === null)
                 return;
 
-            playerData.lookingForGame = true;
-
-            MatchMaking.push(socket.id);
-            console.log(`Matchmaking => Insert ${playerData.username} as ${socket.id}`);
-            CheckMatchMaking();
-            socket.emit('LookingForGame');
-        });
-
-        socket.on('Ready', () => {
-            if (!playerData.inGame)
-                return;
-            if (playerData.ready)
-                return;
-
-            playerData.ready = true;
-            console.log(`Game: ${playerData.currentGame} | Player => ${playerData.username} Ready`);
-
-            if (IsEnemyReady(socket.id)) {
-
-                StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
+            if (isString(Username) && Username.length !== 0) {
+                playerData.username = Username;
+            } else {
+                //Generate a username
+                playerData.username = nanoID.nanoid().substring(0, 6);
             }
+            console.log(`RegisteredPlayer => ${socket.id} as ${playerData.username}`);
+            socket.emit('LoggedIn', {Username: playerData.username});
 
-            let enemy = GetPlayerSocket(playerData.currentEnemy);
-            enemy.emit('EnemyReady');
+            socket.on('Play', () => {
+                if (playerData.inGame && !playerData.lookingForGame)
+                    return;
+
+                playerData.lookingForGame = true;
+
+                MatchMaking.push(socket.id);
+                console.log(`Matchmaking => Insert ${playerData.username} as ${socket.id}`);
+                CheckMatchMaking();
+                socket.emit('LookingForGame');
+            });
+
+            socket.on('Ready', () => {
+                if (!playerData.inGame)
+                    return;
+                if (playerData.ready)
+                    return;
+
+                playerData.ready = true;
+                console.log(`Game: ${playerData.currentGame} | Player => ${playerData.username} Ready`);
+
+                if (IsEnemyReady(socket.id)) {
+
+                    StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
+                }
+
+                let enemy = GetPlayerSocket(playerData.currentEnemy);
+                enemy.emit('EnemyReady');
+            });
+
+            socket.on('LeaveGame', () => LeaveGame(socket.id, socket.data.playerData));
+
+            socket.on('LeaveQueue', () => {
+                if (!playerData.lookingForGame)
+                    return;
+
+                RemovePlayerFromMatchMaking(socket.id);
+                playerData.lookingForGame = false;
+            });
+
+            socket.on('Click', ({Selection, Position}) => {
+                if (!playerData.inGame)
+                    return;
+
+                if (!Array.isArray(Selection))
+                    return;
+
+                if (Selection.length !== TEAM_COUNT)
+                    return;
+
+                let boolCheck = ArrayValuesAllBooleanAndNotAllFalse(Selection, 6);
+                if (!boolCheck)
+                    return;
+
+                if (typeof Position.x !== 'number' || typeof Position.z !== 'number')
+                    return;
+
+                let point = {x: Position.x, z: Position.z};
+
+                let newPoint = {
+                    GameID: playerData.gameIndex,
+                    Selected: Selection,
+                    Point: point,
+                    Team: playerData.currentTeam
+                };
+                let gameServer = playerData.gameserver;
+                io.to(gameServer).emit("Click", newPoint);
+            });
         });
-
-        socket.on('LeaveGame', () => LeaveGame(socket.id, socket.data.playerData));
-
-        socket.on('LeaveQueue', () => {
-            if (!playerData.lookingForGame)
-                return;
-
-            RemovePlayerFromMatchMaking(socket.id);
-            playerData.lookingForGame = false;
-        });
-
-        socket.on('Click', ({Selection, Position}) => {
-            if (!playerData.inGame)
-                return;
-
-            if (!Array.isArray(Selection))
-                return;
-
-            if (Selection.length !== TEAM_COUNT)
-                return;
-
-            let boolCheck = ArrayValuesAllBooleanAndNotAllFalse(Selection, 6);
-            if (!boolCheck)
-                return;
-
-            if (typeof Position.x !== 'number' || typeof Position.z !== 'number')
-                return;
-
-            let point = {x: Position.x, z: Position.z};
-
-            let newPoint = {
-                GameID: playerData.gameIndex,
-                Selected: Selection,
-                Point: point,
-                Team: playerData.currentTeam
-            };
-            let gameServer = playerData.gameserver;
-            io.to(gameServer).emit("Click", newPoint);
-        });
-    });
-
+    }
     socket.on('disconnect', () => {
         if (isGameServer) {
 
-            //Gather all games running on server and notify all players of disconnection
             NotifyPlayersOfGameServerDisconnect(socket.id);
             let id = GameServers.indexOf(socket.data.serverData);
             if (id !== -1) {
