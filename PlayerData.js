@@ -13,6 +13,8 @@ class PlayerData {
         this.username = '';
         this.selected = [false, false, false, false, false, false];
         this.observing = false;
+        this.actions = 0;
+        this.gameStarted = 0;
     }
 }
 module.exports = { PlayerData };

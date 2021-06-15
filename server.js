@@ -178,13 +178,6 @@ function GetRegisteredGame(RoomName) {
     return -1;
 }
 
-function IsEnemyReady(team) {
-    let playerData = GetPlayerData(team);
-    let enemyData = GetPlayerData(playerData.currentEnemy);
-
-    return enemyData.ready;
-}
-
 function isString(value) {
     return typeof value === 'string' || value instanceof String;
 }
@@ -194,22 +187,25 @@ function LeaveGame(id, playerData) {
         return;
     //Check if game is running or has ended
     RemoveRegisteredGame(playerData.currentGame);
+    let now = Date.now();
     let RoomIndex = playerData.gameIndex;
-
-    let enemy = GetPlayerData(playerData.currentEnemy);
-    let enemyId = GetPlayerSocket(playerData.currentEnemy).id;
+    let enemySocket = GetPlayerSocket(playerData.currentEnemy);
+    let enemyData = enemySocket.data.playerData;
+    let gameTime = now - enemyData.gameStarted;
+    let enemyId = enemySocket.id;
     let RoomName = playerData.currentGame;
-    let result = {$set: {winner: enemy.username, winnersID: enemyId}}
+    let Actions = [{id, Actions: playerData.actions, APM: playerData.actions / (gameTime / 1000 / 60)}, {enemyId, Actions: enemyData.actions, APM: enemyData.actions / (gameTime / 1000 / 60)}];
+    let result = {$set: {winner: enemyData.username, winnersID: enemyId, GameTimeElapsed: gameTime, Actions}};
 
     let filter = {roomName: RoomName};
     let options = {upsert: false};
     mongoDB.updateOne(filter, result, options);
 
-    let enemySocket = GetPlayerSocket(playerData.currentEnemy);
-    if (enemy.inGame && enemy.currentEnemy === id) {
+
+    if (enemyData.inGame && enemyData.currentEnemy === id) {
         enemySocket.emit('PlayerLeft');
-        enemy.inGame = false;
-        enemy.currentEnemy = '';
+        enemyData.inGame = false;
+        enemyData.currentEnemy = '';
 
         let game_server = GetPlayerSocket(playerData.gameserver);
         if (typeof game_server !== 'undefined')
@@ -336,7 +332,7 @@ function SetGameServerStatusOpen(id) {
 function StartReadyCountForGame(currentGame, index) {
     let game = GetRegisteredGame(currentGame);
     if (game !== -1) {
-
+        //Automatic Ready Timeout
         clearTimeout(game.Game.timeout);
     }
     setTimeout(() => {
@@ -425,8 +421,11 @@ function Connect(socket) {
             if (PlayerConnected(BlueTeam) && PlayerConnected(RedTeam)) {
                 let blueSocket = GetPlayerSocket(BlueTeam)
                 let blueData = blueSocket.data.playerData;
+                blueData.actions = 0;
+
                 let redSocket = GetPlayerSocket(RedTeam)
                 let redData = redSocket.data.playerData;
+                redData.actions = 0;
 
                 let TeamBlue = { socket: blueSocket, data: blueData}
                 let TeamRed = { socket: redSocket, data: redData}
@@ -447,7 +446,8 @@ function Connect(socket) {
                     roomName: RoomName,
                     gameServer: socket.id,
                     index: GameIndex,
-                    serverIP: socket.handshake.address
+                    serverIP: socket.handshake.address,
+                    TimeRegistered: Date()
                 }
                 mongoDB.insertOne(game);
 
@@ -456,9 +456,11 @@ function Connect(socket) {
                 gameData.timeout = setTimeout(() => {
                     if (blueData.ready && redData.ready)
                         return;
-
+                    let now = Date.now();
                     blueData.ready = true;
+                    blueData.gameStarted = now;
                     redData.ready = true;
+                    redData.gameStarted = now;
 
                     StartReadyCountForGame(gameData.RoomName);
                 }, 30000);
@@ -476,6 +478,16 @@ function Connect(socket) {
                 let {state, roomName} = netGames[i];
                 socket.in(roomName).emit('GameState', state);
             }
+        });
+
+        socket.on('GameScores', (GameScore) => {
+            let {roomName, scores} = GameScore;
+            let BlueScore = scores[0];
+            let RedScore = scores[1];
+            let result = {$set: {Scores: {BlueScore, RedScore}}};
+            let filter = {roomName};
+            let options = {upsert: false};
+            mongoDB.updateOne(filter, result, options);
         });
 
         socket.emit('RegisteredAsGameServer');
@@ -522,9 +534,13 @@ function Connect(socket) {
 
                 playerData.ready = true;
                 console.log(`Game: ${playerData.currentGame} | Player => ${playerData.username} Ready`);
-
-                if (IsEnemyReady(socket.id)) {
-
+                playerData.actions = 0;
+                //let playerData = GetPlayerData(team);
+                let enemyData = GetPlayerData(playerData.currentEnemy);
+                if (enemyData.ready) {
+                    let now = Date.now();
+                    enemyData.gameStarted = now;
+                    playerData.gameStarted = now;
                     StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
                 }
 
@@ -568,6 +584,7 @@ function Connect(socket) {
                     Team: playerData.currentTeam
                 };
                 let gameServer = playerData.gameserver;
+                playerData.actions++;
                 io.to(gameServer).emit("Click", newPoint);
             });
         });
