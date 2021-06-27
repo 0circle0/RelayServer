@@ -101,14 +101,14 @@ function CheckMatchMaking() {
     let blue = MatchMaking.pop();
 
     //Make sure players are online still
-    if (!PlayerConnected(blue)) {
+    if (!PlayerConnected(blue).result) {
         console.log(`${blue}: Matchmaking => Removed | Reason: Offline`);
         CheckMatchMaking();
         return;
     }
 
     let red = MatchMaking.pop();
-    if (!PlayerConnected(red)) {
+    if (!PlayerConnected(red).result) {
         console.log(`${red}: Matchmaking => Removed | Reason: Offline`);
         PutIntoMatchMaking(blue, undefined);
         CheckMatchMaking();
@@ -125,6 +125,23 @@ function CheckMatchMaking() {
 
     io.to(gameServerID).emit('GameRequest', request);
     console.log(`Matchmaking => GameRequest to ${gameServerID} for \n\t Players: ${blue}, ${red}`);
+}
+
+function SoloRequest(socketID) {
+    let server = FindOpenGameServer();
+    if (server === -1) {
+        console.log("No GameServer");
+        return;
+    }
+    let gameServerID = GameServers[server].id;
+
+    let request = {
+        BlueTeam: socketID,
+        RedTeam: '-1',
+        RoomName: nanoID.nanoid().toString()
+    }
+    io.to(gameServerID).emit('GameRequestSolo', request);
+    console.log(`Matchmaking => GameRequest to ${gameServerID} for \n\t Solo Game: ${socketID}`);
 }
 
 function FindOpenGameServer() {
@@ -189,24 +206,39 @@ function LeaveGame(id, playerData) {
     RemoveRegisteredGame(playerData.currentGame);
     let now = Date.now();
     let RoomIndex = playerData.gameIndex;
+
+
     let enemySocket = GetPlayerSocket(playerData.currentEnemy);
-    let enemyData = enemySocket.data.playerData;
-    let gameTime = now - enemyData.gameStarted;
-    let enemyId = enemySocket.id;
-    let RoomName = playerData.currentGame;
-    let Actions = [{id, Actions: playerData.actions, APM: playerData.actions / (gameTime / 1000 / 60)}, {enemyId, Actions: enemyData.actions, APM: enemyData.actions / (gameTime / 1000 / 60)}];
-    let result = {$set: {winner: enemyData.username, winnersID: enemyId, GameTimeElapsed: gameTime, Actions}};
-
-    let filter = {roomName: RoomName};
-    let options = {upsert: false};
-    mongoDB.updateOne(filter, result, options);
+    if (typeof enemySocket !== 'undefined') {
+        let enemyData = enemySocket.data.playerData;
+        let gameTime = now - enemyData.gameStarted;
+        let enemyId = enemySocket.id;
 
 
-    if (enemyData.inGame && enemyData.currentEnemy === id) {
-        enemySocket.emit('PlayerLeft');
-        enemyData.inGame = false;
-        enemyData.currentEnemy = '';
+        let RoomName = playerData.currentGame;
+        let Actions = [{id, Actions: playerData.actions, APM: playerData.actions / (gameTime / 1000 / 60)}, {
+            enemyId,
+            Actions: enemyData.actions,
+            APM: enemyData.actions / (gameTime / 1000 / 60)
+        }];
+        let result = {$set: {winner: enemyData.username, winnersID: enemyId, GameTimeElapsed: gameTime, Actions}};
 
+        let filter = {roomName: RoomName};
+        let options = {upsert: false};
+        mongoDB.updateOne(filter, result, options);
+
+
+        if (enemyData.inGame && enemyData.currentEnemy === id) {
+            enemySocket.emit('PlayerLeft');
+            enemyData.inGame = false;
+            enemyData.currentEnemy = '';
+
+            let game_server = GetPlayerSocket(playerData.gameserver);
+            if (typeof game_server !== 'undefined')
+                game_server.emit('ResetGame', {RoomIndex});
+            RemoveAllPlayersFromRoom(playerData.currentGame);
+        }
+    } else {
         let game_server = GetPlayerSocket(playerData.gameserver);
         if (typeof game_server !== 'undefined')
             game_server.emit('ResetGame', {RoomIndex});
@@ -252,26 +284,21 @@ function NotifyPlayersOfGameServerDisconnect(gameServerOwnerID) {
 
 function PlayerConnected(id) {
     let socket = GetPlayerSocket(id)
-    return typeof id !== 'undefined' && typeof socket !== 'undefined';
+    return {result: typeof id !== 'undefined' && typeof socket !== 'undefined', socket};
 }
 
 function PutIntoMatchMaking(blueTeam, redTeam) {
-    if (PlayerConnected(blueTeam)) {
+    let {result: blueResult} = PlayerConnected(blueTeam);
+    if (blueResult) {
         MatchMaking.unshift(blueTeam);
         console.log(`${blueTeam}: Matchmaking => Insert`);
     }
-    if (PlayerConnected(redTeam)) {
+
+    let {result: redResult} = PlayerConnected(redTeam);
+    if (redResult) {
         MatchMaking.unshift(redTeam);
         console.log(`${redTeam}: Matchmaking => Insert`);
     }
-}
-
-function RegisterGameBetween(blueTeam, redTeam, roomName, gameServer, index) {
-    SetGameForPlayer(blueTeam, redTeam, roomName, gameServer, index, 0);
-    SetGameForPlayer(redTeam, blueTeam, roomName, gameServer, index, 1);
-
-    console.log(`GameServer: ${gameServer} => Created Room: ${roomName} \n\tPlayers ${blueTeam.data.username}: ${blueTeam.socket.id}, ${redTeam.data.username}: ${redTeam.socket.id}`);
-
 }
 
 function RemoveAllPlayersFromRoom(roomName) {
@@ -295,9 +322,34 @@ function SendMessageToPlayers(blueTeam, redTeam, message) {
     io.to(blueTeam).to(redTeam).emit(message);
 }
 
-function SetGameForPlayer(team, enemy, room, server, index, currentTeam) {
+function RegisterGameBetween(blueTeam, redTeam, roomName, gameServer, index) {
+    let redUsername = 'Tim';
+    let blueUsername = 'Tim';
+    let redSocket = typeof 'undefined';
+    let blueSocket = typeof 'undefined';
+    if (typeof blueTeam.socket !== 'undefined') {
+        SetGameForPlayer(blueTeam, redTeam, roomName, gameServer, index, 0);
+        blueUsername = blueTeam.data.username;
+        blueSocket = blueTeam.socket.id;
+    }
 
-    let enemyID = enemy.socket.id;
+    if (typeof redTeam.socket !== 'undefined') {
+        SetGameForPlayer(redTeam, blueTeam, roomName, gameServer, index, 1);
+        redUsername = redTeam.data.username;
+        redSocket = redTeam.socket.id;
+    }
+
+    console.log(`GameServer: ${gameServer} => Created Room: ${roomName} \n\tPlayers ${blueUsername}: ${blueSocket}, ${redUsername}: ${redSocket}`);
+
+}
+
+function SetGameForPlayer(team, enemy, room, server, index, currentTeam) {
+    let enemyID;
+    if (typeof enemy.socket == 'undefined')
+        enemyID = '-1';
+    else
+        enemyID = enemy.socket.id;
+
     let playerSocket = team.socket;
     let {playerData} = playerSocket.data;
     playerData.lookingForGame = false;
@@ -416,15 +468,42 @@ function Connect(socket) {
             console.log(`GameServer: ${socket.id} => GamesOpen: ${GamesOpen()}`);
         });
 
-        socket.on('GameRegistered', ({BlueTeam, RedTeam, RoomName, GameIndex}) => {
-
-            if (PlayerConnected(BlueTeam) && PlayerConnected(RedTeam)) {
-                let blueSocket = GetPlayerSocket(BlueTeam)
+        socket.on('GameRegisteredSolo', ({BlueTeam, RedTeam, RoomName, GameIndex}) => {
+            let {result:blueResult, socket: blueSocket} = PlayerConnected(BlueTeam);
+            if (blueResult) {
+                //let blueSocket = blue.socket;
                 let blueData = blueSocket.data.playerData;
                 blueData.actions = 0;
+                let TeamBlue = { socket: blueSocket, data: blueData}
+                RegisterGameBetween(TeamBlue, typeof 'undefined', RoomName, socket.id, GameIndex);
+                socket.join(RoomName);
+                io.to(BlueTeam).emit('InGame', {Enemy: {Enemy: "Tim", EnemyID: RedTeam}, BlueTeam, RedTeam});
+                let players = [BlueTeam, RedTeam];
+                let gameData = new GameData(RoomName, players, socket.id);
+                gameData.timeout = setTimeout(() => {
 
-                let redSocket = GetPlayerSocket(RedTeam)
-                let redData = redSocket.data.playerData;
+                    let now = Date.now();
+                    blueData.ready = true;
+                    blueData.gameStarted = now;
+
+                    StartReadyCountForGame(gameData.RoomName);
+                }, 4000);
+                RegisteredGames.push(gameData);
+            } else {
+                socket.emit('ResetGame', RoomName);
+            }
+        });
+
+        socket.on('GameRegistered', ({BlueTeam, RedTeam, RoomName, GameIndex}) => {
+
+            let {result: blueResult, socket: blueSocket} = PlayerConnected(BlueTeam);
+
+            let {result: redResult, socket: redSocket} = PlayerConnected(RedTeam);
+
+            if (blueResult && redResult) {
+                let {playerData: blueData} = blueSocket.data;
+                let {playerData: redData} = redSocket.data;
+                blueData.actions = 0;
                 redData.actions = 0;
 
                 let TeamBlue = { socket: blueSocket, data: blueData}
@@ -433,13 +512,14 @@ function Connect(socket) {
                 RegisterGameBetween(TeamBlue, TeamRed, RoomName, socket.id, GameIndex);
                 socket.join(RoomName);
 
-                io.to(BlueTeam).emit('InGame', {Enemy: redData.username, BlueTeam, RedTeam});
-                io.to(RedTeam).emit('InGame', {Enemy: blueData.username, BlueTeam, RedTeam});
+                let blueEnemy = {Enemy: redData.username, EnemyID: RedTeam};
+                let redEnemy = {Enemy: blueData.username, EnemyID: BlueTeam};
+
+                io.to(BlueTeam).emit('InGame', {Enemy: blueEnemy, BlueTeam, RedTeam});
+                io.to(RedTeam).emit('InGame', {Enemy: redEnemy, BlueTeam, RedTeam});
 
                 let players = [{BlueTeam, Username: blueData.username, IP: blueSocket.handshake.address}, {
-                    RedTeam,
-                    Username: redData.username,
-                    IP: redSocket.handshake.address
+                    RedTeam, Username: redData.username, IP: redSocket.handshake.address
                 }];
                 let game = {
                     players,
@@ -514,6 +594,12 @@ function Connect(socket) {
             console.log(`RegisteredPlayer => ${socket.id} as ${playerData.username}`);
             socket.emit('LoggedIn', {Username: playerData.username});
 
+            socket.on('Solo', () => {
+                if (playerData.inGame && !playerData.lookingForGame)
+                    return;
+                SoloRequest(socket.id);
+            });
+
             socket.on('Play', () => {
                 if (playerData.inGame && !playerData.lookingForGame)
                     return;
@@ -536,16 +622,22 @@ function Connect(socket) {
                 console.log(`Game: ${playerData.currentGame} | Player => ${playerData.username} Ready`);
                 playerData.actions = 0;
                 //let playerData = GetPlayerData(team);
-                let enemyData = GetPlayerData(playerData.currentEnemy);
-                if (enemyData.ready) {
+                if (playerData.currentEnemy !== '-1' ) {
+                    let enemyData = GetPlayerData(playerData.currentEnemy);
+                    if (enemyData.ready) {
+                        let now = Date.now();
+                        enemyData.gameStarted = now;
+                        playerData.gameStarted = now;
+                        StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
+                    }
+
+                    let enemy = GetPlayerSocket(playerData.currentEnemy);
+                    enemy.emit('EnemyReady');
+                } else {
                     let now = Date.now();
-                    enemyData.gameStarted = now;
                     playerData.gameStarted = now;
                     StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
                 }
-
-                let enemy = GetPlayerSocket(playerData.currentEnemy);
-                enemy.emit('EnemyReady');
             });
 
             socket.on('LeaveGame', () => LeaveGame(socket.id, socket.data.playerData));
