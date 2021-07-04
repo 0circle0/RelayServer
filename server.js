@@ -87,6 +87,19 @@ function ArrayValuesAllBooleanAndNotAllFalse(Selection, count) {
     return falseCount !== count;
 }
 
+function CheckForSoloGamesInMatchMaking() {
+    let checked = [];
+
+    while(MatchMaking.length > 0) {
+        let MM = MatchMaking.pop();
+        if (!MM.Solo)
+            checked.push(MM);
+        else
+            SoloRequest(MM.socket);
+    }
+    MatchMaking = checked;
+}
+
 function CheckMatchMaking() {
 
     if (MatchMaking.length < 2)
@@ -99,18 +112,24 @@ function CheckMatchMaking() {
     }
 
     let blue = MatchMaking.pop();
-
+    console.log(blue);
+    if (blue.Solo) {
+        SoloRequest(blue.socket);
+        console.log('Process Solo Request');
+        CheckMatchMaking();
+        return;
+    }
     //Make sure players are online still
-    if (!PlayerConnected(blue).result) {
-        console.log(`${blue}: Matchmaking => Removed | Reason: Offline`);
+    if (!PlayerConnected(blue.socket).result) {
+        console.log(`${blue.socket}: Matchmaking => Removed | Reason: Offline`);
         CheckMatchMaking();
         return;
     }
 
     let red = MatchMaking.pop();
-    if (!PlayerConnected(red).result) {
-        console.log(`${red}: Matchmaking => Removed | Reason: Offline`);
-        PutIntoMatchMaking(blue, undefined);
+    if (!PlayerConnected(red.socket).result) {
+        console.log(`${red.socket}: Matchmaking => Removed | Reason: Offline`);
+        PutIntoMatchMaking(blue.socket, undefined);
         CheckMatchMaking();
         return;
     }
@@ -118,19 +137,20 @@ function CheckMatchMaking() {
     let gameServerID = GameServers[server].id;
 
     let request = {
-        BlueTeam: blue,
-        RedTeam: red,
+        BlueTeam: blue.socket,
+        RedTeam: red.socket,
         RoomName: nanoID.nanoid().toString()
     }
 
     io.to(gameServerID).emit('GameRequest', request);
-    console.log(`Matchmaking => GameRequest to ${gameServerID} for \n\t Players: ${blue}, ${red}`);
+    console.log(`Matchmaking => GameRequest to ${gameServerID} for \n\t Players: ${blue.socket}, ${red.socket}`);
 }
 
 function SoloRequest(socketID) {
     let server = FindOpenGameServer();
     if (server === -1) {
         console.log("No GameServer");
+        PutPlayerIntoMatchMaking(socketID, true);
         return;
     }
     let gameServerID = GameServers[server].id;
@@ -179,7 +199,13 @@ function GetPlayerSocket(id) {
 }
 
 function RemovePlayerFromMatchMaking(id) {
-    let player = MatchMaking.indexOf(id);
+    let player = -1;
+    for(let mm in MatchMaking) {
+        let MM = MatchMaking[mm];
+        if (MM.socket == id) {
+            player = mm;
+        }
+    }
 
     if (player !== -1) {
         MatchMaking.splice(player, 1);
@@ -268,12 +294,13 @@ function NotifyPlayersOfGameServerDisconnect(gameServerOwnerID) {
         removedCount++;
         for (let k = 0; k < data.Players.length; k++) {
             let player = data.Players[k];
-            console.log(player)
-            console.log('test');
-            let playerData = GetPlayerData(player);
-            playerData.inGame = false;
 
-            io.to(player).emit('GameServerOffline');
+            if (player !== '-1') {
+                let playerData = GetPlayerData(player);
+                playerData.inGame = false;
+
+                io.to(player).emit('GameServerOffline');
+            }
         }
     }
 
@@ -287,18 +314,33 @@ function PlayerConnected(id) {
     return {result: typeof id !== 'undefined' && typeof socket !== 'undefined', socket};
 }
 
-function PutIntoMatchMaking(blueTeam, redTeam) {
-    let {result: blueResult} = PlayerConnected(blueTeam);
-    if (blueResult) {
-        MatchMaking.unshift(blueTeam);
-        console.log(`${blueTeam}: Matchmaking => Insert`);
+function PutPlayerIntoMatchMaking(Player, Solo = false) {
+    let {result, socket} = PlayerConnected(Player);
+    if (result) {
+        let MM = {
+            socket: socket.id, Solo
+        }
+        //MatchMaking.push(Player);
+        MatchMaking.push(MM);
+        console.log(`${socket.id}: Matchmaking => Insert as Solo Request`);
     }
+}
 
-    let {result: redResult} = PlayerConnected(redTeam);
-    if (redResult) {
-        MatchMaking.unshift(redTeam);
-        console.log(`${redTeam}: Matchmaking => Insert`);
+function PutPlayerInFrontOfMatchMaking(Player, Solo) {
+    let {result, socket} = PlayerConnected(Player);
+    if (result) {
+        let MM = {
+            socket: socket.id, Solo
+        }
+        //MatchMaking.push(Player);
+        MatchMaking.unshift(MM);
+        console.log(`${socket.id}: Matchmaking => Insert`);
     }
+}
+
+function PutIntoMatchMaking(blueTeam, redTeam) {
+    PutPlayerInFrontOfMatchMaking(blueTeam);
+    PutPlayerInFrontOfMatchMaking(redTeam);
 }
 
 function RemoveAllPlayersFromRoom(roomName) {
@@ -464,6 +506,10 @@ function Connect(socket) {
         socket.on('GamesOpen', (gamesOpen) => {
             serverData.gamesOpen = gamesOpen;
             gamesOpen === 0 ? SetGameServerStatusFull(socket.id) : SetGameServerStatusOpen(socket.id);
+            if (GameServers.length == 1 && serverData.firstRun) {
+                CheckForSoloGamesInMatchMaking();
+                serverData.firstRun = false;
+            }
             CheckMatchMaking();
             console.log(`GameServer: ${socket.id} => GamesOpen: ${GamesOpen()}`);
         });
@@ -481,10 +527,16 @@ function Connect(socket) {
                 let players = [BlueTeam, RedTeam];
                 let gameData = new GameData(RoomName, players, socket.id);
                 gameData.timeout = setTimeout(() => {
+                    if (typeof GetPlayerSocket(blueData.gameserver) === 'undefined')
+                        return;
+
+                    if (typeof blueSocket === 'undefined')
+                        return;
 
                     let now = Date.now();
                     blueData.ready = true;
                     blueData.gameStarted = now;
+                    //Make sure Game server and players are still online
 
                     StartReadyCountForGame(gameData.RoomName);
                 }, 4000);
@@ -536,6 +588,16 @@ function Connect(socket) {
                 gameData.timeout = setTimeout(() => {
                     if (blueData.ready && redData.ready)
                         return;
+
+                    if (typeof GetPlayerSocket(blueData.gameserver) === 'undefined')
+                        return;
+
+                    if (typeof blueSocket === 'undefined')
+                        return;
+
+                    if (typeof redSocket === 'undefined')
+                        return;
+
                     let now = Date.now();
                     blueData.ready = true;
                     blueData.gameStarted = now;
@@ -571,6 +633,7 @@ function Connect(socket) {
         });
 
         socket.emit('RegisteredAsGameServer');
+
     }
 
     /**
@@ -605,8 +668,11 @@ function Connect(socket) {
                     return;
 
                 playerData.lookingForGame = true;
-
-                MatchMaking.push(socket.id);
+                let MM = {
+                    socket: socket.id, Solo: false
+                }
+                //MatchMaking.push(socket.id);
+                MatchMaking.push(MM);
                 console.log(`Matchmaking => Insert ${playerData.username} as ${socket.id}`);
                 CheckMatchMaking();
                 socket.emit('LookingForGame');
