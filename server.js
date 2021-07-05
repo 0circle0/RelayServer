@@ -100,6 +100,23 @@ function CheckForSoloGamesInMatchMaking() {
     MatchMaking = checked;
 }
 
+function GetNextTeamMatchInMatchMaking(iterations) {
+    let team = MatchMaking.pop();
+    //Try 3 times to find a multiplayer game then process a solo game.
+    if (team.Solo) {
+        if (iterations <= 2) {
+            MatchMaking.push(team);
+            return GetNextTeamMatchInMatchMaking(iterations++);
+        } else {
+            SoloRequest(team.socket);
+            console.log('Process Solo Request');
+            return GetNextTeamMatchInMatchMaking(iterations++);
+        }
+
+    }
+    return team;
+}
+
 function CheckMatchMaking() {
 
     if (MatchMaking.length < 2)
@@ -111,14 +128,7 @@ function CheckMatchMaking() {
         return;
     }
 
-    let blue = MatchMaking.pop();
-    console.log(blue);
-    if (blue.Solo) {
-        SoloRequest(blue.socket);
-        console.log('Process Solo Request');
-        CheckMatchMaking();
-        return;
-    }
+    let blue = GetNextTeamMatchInMatchMaking(0);
     //Make sure players are online still
     if (!PlayerConnected(blue.socket).result) {
         console.log(`${blue.socket}: Matchmaking => Removed | Reason: Offline`);
@@ -126,7 +136,7 @@ function CheckMatchMaking() {
         return;
     }
 
-    let red = MatchMaking.pop();
+    let red = GetNextTeamMatchInMatchMaking(0);
     if (!PlayerConnected(red.socket).result) {
         console.log(`${red.socket}: Matchmaking => Removed | Reason: Offline`);
         PutIntoMatchMaking(blue.socket, undefined);
@@ -202,7 +212,7 @@ function RemovePlayerFromMatchMaking(id) {
     let player = -1;
     for(let mm in MatchMaking) {
         let MM = MatchMaking[mm];
-        if (MM.socket == id) {
+        if (MM.socket === id) {
             player = mm;
         }
     }
@@ -506,7 +516,8 @@ function Connect(socket) {
         socket.on('GamesOpen', (gamesOpen) => {
             serverData.gamesOpen = gamesOpen;
             gamesOpen === 0 ? SetGameServerStatusFull(socket.id) : SetGameServerStatusOpen(socket.id);
-            if (GameServers.length == 1 && serverData.firstRun) {
+            //Also check if completely full also firstRun should always be set to false in this call
+            if (GameServers.length === 1 && serverData.firstRun) {
                 CheckForSoloGamesInMatchMaking();
                 serverData.firstRun = false;
             }
@@ -700,8 +711,7 @@ function Connect(socket) {
                     let enemy = GetPlayerSocket(playerData.currentEnemy);
                     enemy.emit('EnemyReady');
                 } else {
-                    let now = Date.now();
-                    playerData.gameStarted = now;
+                    playerData.gameStarted = Date.now();
                     StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
                 }
             });
