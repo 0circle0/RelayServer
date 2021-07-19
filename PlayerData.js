@@ -11,7 +11,7 @@ class PlayerData {
         this.responded = false;
         this.ready = false;
         this.username = '';
-        this.selected = [false, false, false, false, false, false];
+        this.selected = 0;
         this.observing = false;
         this.actions = 0;
         this.gameStarted = 0;
