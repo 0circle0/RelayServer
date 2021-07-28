@@ -4,7 +4,7 @@ const DEBUGGING = true;
 require('dotenv').config();
 
 const MongoClient = require('mongodb').MongoClient;
-const url = 'mongodb://localhost:27017';
+const url = 'mongodb://localhost:27017/Football';
 const dbName = 'Football';
 const collectionName = 'Games';
 let _client;
@@ -30,11 +30,18 @@ io = require('socket.io')(PORT);
 const GAME_SERVER_PASSWORD = process.env.PASSWORD;
 const ADMIN_SERVER_PASSWORD = process.env.ADMIN;
 const PLAYER_PASSWORD = process.env.PLAYER;
+const MASTER_PASSWORD = process.env.MASTERAPIKEY;
+const MASTER_IP = process.env.MASTERIP;
+const MASTER_PORT = process.env.MASTERPORT;
+const THIS_IP = process.env.THISIPADDRESS;
+const InstanceID = process.env.INSTANCEID;
 
 let hasGameServer = false;
 let adminSocket;
 let GameServerCount = 0;
-const TEAM_COUNT = 6;
+const TEAM_COUNT = 8;
+let requiresRegistration = true;
+let previousStatus;
 
 let GameServers = [];
 let MatchMaking = [];
@@ -42,50 +49,123 @@ let MatchMaking = [];
 if (!DEBUGGING)
     console.log = function () {
     };
-//API
-//const express = require('express');
-//const app = express();
-//const expressPORT = 8080;
-//app.use(express.json());
-//app.listen(expressPORT);
-//app.get('/user/:id', (req, res) => {
-//    let {id} = req.params;
-//    res.status(200).send({"/user": id})
-//});
 
+
+//UDP Server - Connection To Master Server
+const body = {apikey: MASTER_PASSWORD, InstanceID, gamesOpen: 0, totalGames: 0};
+const bodyRegister = {apikey: MASTER_PASSWORD, IP: THIS_IP, PORT, PASS: PLAYER_PASSWORD, InstanceID, date: 0};
+let createClient = require('dgramx').createClient;
+let addr = `udp://${MASTER_IP}:${MASTER_PORT}`;
+let client = createClient(addr);
+let connectedToMaster = false;
+
+client.bind(0);
+client.on('status', (msg) =>{
+    ProcessStatus(msg);
+});
+
+setInterval(()=>{
+    if (!connectedToMaster)
+        requiresRegistration = true;
+
+    let gamesOpen = 0;
+    let totalGames = 0;
+    for (let i = 0; i < GameServers.length; i++) {
+        let gs = GameServers[i];
+        gamesOpen += gs.gamesOpen;
+        totalGames += gs.totalGames;
+    }
+    body.gamesOpen = gamesOpen;
+    body.totalGames = totalGames;
+    if (requiresRegistration)
+        bodyRegister.date = Date.now();
+    let path = requiresRegistration ? `relayRegister` : `relayUpdate`;
+    client.emit(path, JSON.stringify(requiresRegistration ? bodyRegister : body));
+
+}, 1000);
+
+function GetMasterInterval () {
+    return setInterval(() =>{
+        connectedToMaster = false;
+        console.log('Master server disconnected');
+        clearInterval(masterConnectionInterval);
+    }, 2000);
+}
+
+let masterConnectionInterval = GetMasterInterval();
+
+function ProcessStatus(res) {
+    connectedToMaster = true;
+    if (masterConnectionInterval) {
+        clearInterval(masterConnectionInterval);
+        masterConnectionInterval = null;
+    }
+    masterConnectionInterval = GetMasterInterval();
+    switch (res) {
+        case 200:
+            if (previousStatus !== res)
+                console.log('Updated Successfully, Status: \'OK\'');
+            previousStatus = res;
+            break;
+        case 201:
+            console.log(`Registered with Master Server. { InstanceID: ${InstanceID}, IP: ${THIS_IP}, PORT: ${PORT} }`);
+            requiresRegistration = false;
+            break;
+        case 202:
+            console.log('Registration Successfully Updated.');
+            break;
+        case 204:
+            if (previousStatus !== res)
+                console.log('Updated Successfully, Status: \'No Content\'.');
+            previousStatus = res;
+            break;
+        case 410:
+            console.log('Update failed \'Require Registration\'.');
+            requiresRegistration = true;
+            break;
+        case 425:
+            console.log('Register failed. Too Early');
+            requiresRegistration = true;
+            break;
+    }
+}
+
+//Relay Server Connections to Game Clients and Game Servers
 StartServer();
 
 function StartServer() {
     let options = {useNewUrlParser: true, useUnifiedTopology: true};
 
-    let mc = MongoClient.connect(url, options, (err, client) => {
+    MongoClient.connect(url, options, (err, client) => {
         if (err) {
-            console.log(err);
+            console.log(err)
             return;
         }
+
         console.log("Connected to Mongo");
+
         _client = client;
-        mongoDB = client.db(dbName).collection(collectionName);
-        io.on('connection', Connect);
-        console.log("Started Server");
+        let db = client.db(dbName);
+
+        db.listCollections().toArray(function (err, collections) {
+            let bb = collections.some(function (col) {
+                return col.name === 'Games'
+            });
+
+            if (!bb) {
+                db.createCollection("Games", function (err, res) {
+                    console.log("Games Collection created!");
+                });
+            }
+
+            mongoDB = db.collection(collectionName);
+            io.on('connection', Connect);
+            console.log("Started Server");
+
+        });
     });
 
     //new Prompter(io);
-}
-
-function ArrayValuesAllBooleanAndNotAllFalse(Selection, count) {
-
-    const keys = Object.keys(Selection);
-
-    let falseCount = 0;
-    for (const key in keys) {
-        if (typeof Selection[key] !== 'boolean')
-            return false;
-
-        falseCount += !Selection[key];
-    }
-
-    return falseCount !== count;
 }
 
 function CheckForSoloGamesInMatchMaking() {
@@ -227,7 +307,7 @@ function RemovePlayerFromMatchMaking(id) {
 function GetRegisteredGame(RoomName) {
     let gameID = RegisteredGames.findIndex((data) => data.RoomName === RoomName);
     if (gameID !== -1) {
-        return {Game: RegisteredGames[gameID], ID: gameID};
+        return {RegisteredGame: RegisteredGames[gameID], ID: gameID};
     }
     return -1;
 }
@@ -365,7 +445,7 @@ function RemoveRegisteredGame(currentGame) {
     if (game !== -1) {
         let {ID} = game;
 
-        clearTimeout(game.Game.timeout);
+        clearTimeout(game.RegisteredGame.timeout);
         RegisteredGames.splice(ID, 1);
     }
 }
@@ -435,13 +515,15 @@ function SetGameServerStatusOpen(id) {
 
 function StartReadyCountForGame(currentGame, index) {
     let game = GetRegisteredGame(currentGame);
+
     if (game !== -1) {
+        let g = game.RegisteredGame;
         //Automatic Ready Timeout
-        clearTimeout(game.Game.timeout);
+        clearTimeout(g.timeout);
     }
     setTimeout(() => {
-
-        io.in(currentGame).emit('ReadyCount', {Game: index});
+        let readyCount = {Game: index};
+        io.in(currentGame).emit('ReadyCount', readyCount);
         console.log(`Game: ${currentGame} => ReadyCount`);
     }, 2000);
 }
@@ -454,24 +536,6 @@ function GamesOpen() {
     return count;
 }
 
-function CheckValidSelection(Selection) {
-    if (!Array.isArray(Selection))
-        return false;
-
-    if (Selection.length !== TEAM_COUNT)
-        return false;
-
-    return true;
-}
-
-function NewCheckValidSelectionNot0(Selection) {
-    if (typeof Selection !== 'number')
-        return false;
-    if (Selection < 1 || Selection > 63)
-        return false;
-    return true;
-}
-
 function NewCheckValidSelection(Selection) {
     if (typeof Selection !== 'number')
         return false;
@@ -480,49 +544,7 @@ function NewCheckValidSelection(Selection) {
     return true;
 }
 
-function NewCheckValidSelectionAndPosition(Selection, Position) {
-    if (typeof Position.x !== 'number' || typeof Position.z !== 'number')
-        return false;
-
-    if (typeof Selection !== 'number')
-        return false;
-
-    if (Selection < 0 || Selection > 63)
-        return false;
-
-    return true;
-}
-
 function CheckValidPosition(Position) {
-    if (typeof Position.x !== 'number' || typeof Position.z !== 'number')
-        return false;
-
-    return true;
-}
-
-function CheckValidSelectionNotAllFalse(Selection) {
-    if (!Array.isArray(Selection))
-        return false;
-
-    if (Selection.length !== TEAM_COUNT)
-        return false;
-
-    let boolCheck = ArrayValuesAllBooleanAndNotAllFalse(Selection, 6);
-
-    return boolCheck;
-}
-
-function CheckValidSelectionAndPosition(Selection, Position) {
-    if (!Array.isArray(Selection))
-        return false;
-
-    if (Selection.length !== TEAM_COUNT)
-        return false;
-
-    let boolCheck = ArrayValuesAllBooleanAndNotAllFalse(Selection, 6);
-    if (!boolCheck)
-        return false;
-
     if (typeof Position.x !== 'number' || typeof Position.z !== 'number')
         return false;
 
@@ -536,7 +558,7 @@ function Connect(socket) {
     /**
      * Game Server Joins with Auth token
      */
-    if (socket.handshake.auth.token === GAME_SERVER_PASSWORD) {
+    if (token === GAME_SERVER_PASSWORD) {
         isGameServer = true;
         hasGameServer = true;
         GameServerCount++;
@@ -588,8 +610,9 @@ function Connect(socket) {
             SetGameServerStatusFull(socket.id);
         });
 
-        socket.on('GamesOpen', (gamesOpen) => {
+        socket.on('GamesOpen', ({gamesOpen, totalGames}) => {
             serverData.gamesOpen = gamesOpen;
+            serverData.totalGames = totalGames;
             gamesOpen === 0 ? SetGameServerStatusFull(socket.id) : SetGameServerStatusOpen(socket.id);
             //Also check if completely full also firstRun should always be set to false in this call
             if (GameServers.length === 1 && serverData.firstRun) {
@@ -597,7 +620,7 @@ function Connect(socket) {
                 serverData.firstRun = false;
             }
             CheckMatchMaking();
-            console.log(`GameServer: ${socket.id} => GamesOpen: ${GamesOpen()}`);
+            console.log(`GameServer: ${socket.id} => GamesOpen: ${GamesOpen()}/${totalGames}`);
         });
 
         socket.on('GameRegisteredSolo', ({BlueTeam, RedTeam, RoomName, GameIndex}) => {
@@ -737,7 +760,7 @@ function Connect(socket) {
      * Player Joins
      */
     //Clients will have the token changed during patches. This will maintain the update status of the game.
-    if (typeof token === 'undefined') {
+    if (token === PLAYER_PASSWORD) {
         socket.on('RegisterPlayer', ({Username}) => {
             let playerData = new PlayerData();
             socket.data.playerData = playerData;

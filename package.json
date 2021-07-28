@@ -9,11 +9,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "dgramx": "^1.0.0",
     "dotenv": "^8.6.0",
     "express": "^4.17.1",
-    "express-rate-limit": "^5.3.0",
     "http": "^0.0.1-security",
-    "mongodb": "^3.6.9",
+    "mongodb": "^4.0.1",
     "nanoid": "^3.1.23",
     "nodemon": "^2.0.12",
     "socket.io": "^4.1.2"

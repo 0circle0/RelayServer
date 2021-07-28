@@ -5,6 +5,7 @@ class ServerData {
         this.id = id;
         this.status = status;
         this.gamesOpen = 0;
+        this.totalGames = 0;
         this.firstRun = true;
         //this.GameStates = [];
         //for(let i = 0; i < 30; i++) {
