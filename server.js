@@ -2,7 +2,8 @@
 
 const DEBUGGING = true;
 require('dotenv').config();
-
+const bcrypt = require('bcrypt');
+const saltRounds = 10;
 const MongoClient = require('mongodb').MongoClient;
 const url = 'mongodb://localhost:27017/Football';
 const dbName = 'Football';
@@ -35,6 +36,9 @@ const MASTER_IP = process.env.MASTERIP;
 const MASTER_PORT = process.env.MASTERPORT;
 const THIS_IP = process.env.THISIPADDRESS;
 const InstanceID = process.env.INSTANCEID;
+const tickDelay = process.env.TickDelay;
+const timeoutDelay = tickDelay * 4;
+const MASTER_HASH_SALT = process.env.MASTERHASHSALT;
 
 let hasGameServer = false;
 let adminSocket;
@@ -82,14 +86,14 @@ setInterval(()=>{
     let path = requiresRegistration ? `relayRegister` : `relayUpdate`;
     client.emit(path, JSON.stringify(requiresRegistration ? bodyRegister : body));
 
-}, 1000);
+}, tickDelay);
 
 function GetMasterInterval () {
     return setInterval(() =>{
         connectedToMaster = false;
         console.log('Master server disconnected');
         clearInterval(masterConnectionInterval);
-    }, 2000);
+    }, timeoutDelay);
 }
 
 let masterConnectionInterval = GetMasterInterval();
@@ -761,153 +765,164 @@ function Connect(socket) {
      */
     //Clients will have the token changed during patches. This will maintain the update status of the game.
     if (token === PLAYER_PASSWORD) {
-        socket.on('RegisterPlayer', ({Username}) => {
-            let playerData = new PlayerData();
-            socket.data.playerData = playerData;
+        socket.on('RegisterPlayer', ({Username, TimeNow, hash}) => {
 
-            if (typeof Username === 'object' || Username === null)
+            let time = Date.now();
+            if (time - TimeNow > 2000)
                 return;
-
-            if (isString(Username) && Username.length !== 0) {
-                playerData.username = Username;
-            } else {
-                //Generate a username
-                playerData.username = nanoID.nanoid().substring(0, 6);
-            }
-            console.log(`RegisteredPlayer => ${socket.id} as ${playerData.username}`);
-            socket.emit('LoggedIn', {Username: playerData.username});
-
-            socket.on('Solo', () => {
-                if (playerData.inGame && !playerData.lookingForGame)
-                    return;
-                SoloRequest(socket.id);
-            });
-
-            socket.on('Play', () => {
-                if (playerData.inGame && !playerData.lookingForGame)
+            let Complete = Username + MASTER_HASH_SALT + TimeNow;
+            bcrypt.compare(Complete, hash, function(err, result) {
+                if (!result)
                     return;
 
-                playerData.lookingForGame = true;
-                let MM = {
-                    socket: socket.id, Solo: false
+                let playerData = new PlayerData();
+                socket.data.playerData = playerData;
+
+                if (typeof Username === 'object' || Username === null)
+                    return;
+
+                if (isString(Username) && Username.length !== 0) {
+                    playerData.username = Username;
+                } else {
+                    //Generate a username
+                    playerData.username = nanoID.nanoid().substring(0, 6);
                 }
-                //MatchMaking.push(socket.id);
-                MatchMaking.push(MM);
-                console.log(`Matchmaking => Insert ${playerData.username} as ${socket.id}`);
-                CheckMatchMaking();
-                socket.emit('LookingForGame');
-            });
+                console.log(`RegisteredPlayer => ${socket.id} as ${playerData.username}`);
+                socket.emit('LoggedIn', {Username: playerData.username});
 
-            socket.on('Ready', () => {
-                if (!playerData.inGame)
-                    return;
-                if (playerData.ready)
-                    return;
+                socket.on('Solo', () => {
+                    if (playerData.inGame && !playerData.lookingForGame)
+                        return;
+                    SoloRequest(socket.id);
+                });
 
-                playerData.ready = true;
-                console.log(`Game: ${playerData.currentGame} | Player => ${playerData.username} Ready`);
-                playerData.actions = 0;
-                //let playerData = GetPlayerData(team);
-                if (playerData.currentEnemy !== '-1') {
-                    let enemyData = GetPlayerData(playerData.currentEnemy);
-                    if (enemyData.ready) {
-                        let now = Date.now();
-                        enemyData.gameStarted = now;
-                        playerData.gameStarted = now;
+                socket.on('Play', () => {
+                    if (playerData.inGame && !playerData.lookingForGame)
+                        return;
+
+                    playerData.lookingForGame = true;
+                    let MM = {
+                        socket: socket.id, Solo: false
+                    }
+                    //MatchMaking.push(socket.id);
+                    MatchMaking.push(MM);
+                    console.log(`Matchmaking => Insert ${playerData.username} as ${socket.id}`);
+                    CheckMatchMaking();
+                    socket.emit('LookingForGame');
+                });
+
+                socket.on('Ready', () => {
+                    if (!playerData.inGame)
+                        return;
+                    if (playerData.ready)
+                        return;
+
+                    playerData.ready = true;
+                    console.log(`Game: ${playerData.currentGame} | Player => ${playerData.username} Ready`);
+                    playerData.actions = 0;
+                    //let playerData = GetPlayerData(team);
+                    if (playerData.currentEnemy !== '-1') {
+                        let enemyData = GetPlayerData(playerData.currentEnemy);
+                        if (enemyData.ready) {
+                            let now = Date.now();
+                            enemyData.gameStarted = now;
+                            playerData.gameStarted = now;
+                            StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
+                        }
+
+                        let enemy = GetPlayerSocket(playerData.currentEnemy);
+                        enemy.emit('EnemyReady');
+                    } else {
+                        playerData.gameStarted = Date.now();
                         StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
                     }
+                });
 
-                    let enemy = GetPlayerSocket(playerData.currentEnemy);
-                    enemy.emit('EnemyReady');
-                } else {
-                    playerData.gameStarted = Date.now();
-                    StartReadyCountForGame(playerData.currentGame, playerData.gameIndex);
-                }
+                socket.on('LeaveGame', () => LeaveGame(socket.id, socket.data.playerData));
+
+                socket.on('LeaveQueue', () => {
+                    if (!playerData.lookingForGame)
+                        return;
+
+                    RemovePlayerFromMatchMaking(socket.id);
+                    playerData.lookingForGame = false;
+                });
+
+                socket.on('Stop', () => {
+                    if (!playerData.inGame)
+                        return;
+
+                    let stopOrder = {
+                        GameID: playerData.gameIndex,
+                        Team: playerData.currentTeam
+                    };
+
+                    let gameServer = playerData.gameserver;
+                    playerData.actions++;
+
+                    io.to(gameServer).emit("Stop", stopOrder);
+                });
+
+                socket.on('Selection', (Selection) => {
+                    if (!playerData.inGame)
+                        return;
+
+                    let passed = NewCheckValidSelection(Selection);
+                    if (!passed)
+                        return;
+
+                    playerData.selected = Selection;
+                    playerData.actions++;
+                    let gameServer = playerData.gameserver;
+                    let selection = {
+                        GameID: playerData.gameIndex,
+                        Selected: Selection,
+                        Team: playerData.currentTeam
+                    };
+                    io.to(gameServer).emit('Selection', selection);
+                });
+
+                socket.on('Sprint', ({Position}) => {
+                    if (!playerData.inGame)
+                        return;
+
+                    let passedCheck = CheckValidPosition(Position);
+                    if (!passedCheck)
+                        return;
+
+                    let point = {x: Position.x, z: Position.z};
+
+                    let newPoint = {
+                        GameID: playerData.gameIndex,
+                        Point: point,
+                        Team: playerData.currentTeam
+                    };
+                    let gameServer = playerData.gameserver;
+                    playerData.actions++;
+                    io.to(gameServer).emit("Sprint", newPoint);
+                });
+
+                socket.on('Click', ({Position}) => {
+                    if (!playerData.inGame)
+                        return;
+
+                    let passedCheck = CheckValidPosition(Position);
+                    if (!passedCheck)
+                        return;
+
+                    let point = {x: Position.x, z: Position.z};
+
+                    let newPoint = {
+                        GameID: playerData.gameIndex,
+                        Point: point,
+                        Team: playerData.currentTeam
+                    };
+                    let gameServer = playerData.gameserver;
+                    playerData.actions++;
+                    io.to(gameServer).emit("Click", newPoint);
+                });
             });
 
-            socket.on('LeaveGame', () => LeaveGame(socket.id, socket.data.playerData));
-
-            socket.on('LeaveQueue', () => {
-                if (!playerData.lookingForGame)
-                    return;
-
-                RemovePlayerFromMatchMaking(socket.id);
-                playerData.lookingForGame = false;
-            });
-
-            socket.on('Stop', () => {
-                if (!playerData.inGame)
-                    return;
-
-                let stopOrder = {
-                    GameID: playerData.gameIndex,
-                    Team: playerData.currentTeam
-                };
-
-                let gameServer = playerData.gameserver;
-                playerData.actions++;
-
-                io.to(gameServer).emit("Stop", stopOrder);
-            });
-
-            socket.on('Selection', (Selection) => {
-                if (!playerData.inGame)
-                    return;
-
-                let passed = NewCheckValidSelection(Selection);
-                if (!passed)
-                    return;
-
-                playerData.selected = Selection;
-                playerData.actions++;
-                let gameServer = playerData.gameserver;
-                let selection = {
-                    GameID: playerData.gameIndex,
-                    Selected: Selection,
-                    Team: playerData.currentTeam
-                };
-                io.to(gameServer).emit('Selection', selection);
-            });
-
-            socket.on('Sprint', ({Position}) => {
-                if (!playerData.inGame)
-                    return;
-
-                let passedCheck = CheckValidPosition(Position);
-                if (!passedCheck)
-                    return;
-
-                let point = {x: Position.x, z: Position.z};
-
-                let newPoint = {
-                    GameID: playerData.gameIndex,
-                    Point: point,
-                    Team: playerData.currentTeam
-                };
-                let gameServer = playerData.gameserver;
-                playerData.actions++;
-                io.to(gameServer).emit("Sprint", newPoint);
-            });
-
-            socket.on('Click', ({Position}) => {
-                if (!playerData.inGame)
-                    return;
-
-                let passedCheck = CheckValidPosition(Position);
-                if (!passedCheck)
-                    return;
-
-                let point = {x: Position.x, z: Position.z};
-
-                let newPoint = {
-                    GameID: playerData.gameIndex,
-                    Point: point,
-                    Team: playerData.currentTeam
-                };
-                let gameServer = playerData.gameserver;
-                playerData.actions++;
-                io.to(gameServer).emit("Click", newPoint);
-            });
         });
     }
     socket.on('disconnect', () => {
